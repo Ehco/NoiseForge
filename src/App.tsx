@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Settings, Download, Play, X, Info, Layers, Maximize2, RefreshCw, Check, AlertCircle } from 'lucide-react';
+import { Settings, Download, Play, X, Info, Layers, Maximize2, RefreshCw, Check, AlertCircle, Upload, Image as ImageIcon } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import NoiseWorker from './noise.worker?worker';
 
@@ -22,10 +22,14 @@ const NOISE_TYPES = [
 ];
 
 const RESOLUTIONS = [
+  { id: '30', name: '30 × 30' },
+  { id: '128', name: '128 × 128' },
+  { id: '256', name: '256 × 256' },
   { id: '512', name: '512 × 512' },
   { id: '1024', name: '1024 × 1024' },
   { id: '2048', name: '2048 × 2048' },
   { id: '4096', name: '4096 × 4096' },
+  { id: '8192', name: '8192 × 8192' },
 ];
 
 const PRESETS = {
@@ -41,7 +45,8 @@ const PRESETS = {
 
 interface NoiseParams {
   noiseType: string;
-  resolution: number;
+  width: number;
+  height: number;
   scale: number;
   octaves: number;
   persistence: number;
@@ -53,12 +58,15 @@ interface NoiseParams {
   seed: number;
   invert: boolean;
   seamless: boolean;
+  imageIntensity: number;
+  noiseIntensity: number;
 }
 
 export default function App() {
   const [params, setParams] = useState<NoiseParams>({
     noiseType: 'fbm',
-    resolution: 4096,
+    width: 512,
+    height: 512,
     scale: 3.0,
     octaves: 8,
     persistence: 0.55,
@@ -70,6 +78,8 @@ export default function App() {
     seed: 42,
     invert: false,
     seamless: true,
+    imageIntensity: 1.0,
+    noiseIntensity: 1.0,
   });
 
   const [isGenerating, setIsGenerating] = useState(false);
@@ -78,9 +88,12 @@ export default function App() {
   const [statText, setStatText] = useState('Configure and generate');
   const [currentResult, setCurrentResult] = useState<any>(null);
   const [previewInfo, setPreviewInfo] = useState('512 × 512 PREVIEW');
+  const [baseImage, setBaseImage] = useState<Uint8Array | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const workerRef = useRef<Worker | null>(null);
+  const debounceTimer = useRef<NodeJS.Timeout | null>(null);
 
   const updateParam = (key: keyof NoiseParams, value: any) => {
     setParams(prev => ({ ...prev, [key]: value }));
@@ -91,27 +104,53 @@ export default function App() {
     setParams(prev => ({ ...prev, ...preset }));
   };
 
-  const generate = useCallback(() => {
-    if (isGenerating) {
-      workerRef.current?.terminate();
-      setIsGenerating(false);
-      setStatus('CANCELLED');
-      setStatText('Generation cancelled by user');
-      setProgress(0);
-      return;
+  const processImage = async (file: File) => {
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    setImagePreview(img.src);
+    await new Promise(resolve => img.onload = resolve);
+
+    const canvas = document.createElement('canvas');
+    // We'll process the image at the current resolution
+    canvas.width = params.width;
+    canvas.height = params.height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.drawImage(img, 0, 0, params.width, params.height);
+    const imageData = ctx.getImageData(0, 0, params.width, params.height);
+    const grayscale = new Uint8Array(params.width * params.height);
+    
+    for (let i = 0; i < imageData.data.length; i += 4) {
+      // Grayscale conversion: 0.299R + 0.587G + 0.114B
+      grayscale[i / 4] = 0.299 * imageData.data[i] + 0.587 * imageData.data[i + 1] + 0.114 * imageData.data[i + 2];
+    }
+    
+    setBaseImage(grayscale);
+  };
+
+  const generate = useCallback((forceResolution?: { w: number, h: number }) => {
+    const w = forceResolution?.w ?? params.width;
+    const h = forceResolution?.h ?? params.height;
+
+    // Safety check for extreme resolutions
+    if (w * h > 16384 * 16384) {
+      setStatus('RESOLUTION TOO HIGH');
+      setStatText('Resolutions above 16k may crash the browser. Proceed with caution.');
+      if (!window.confirm('Resolutions this high can use vast amounts of memory and may crash your browser tab. Continue?')) {
+        return;
+      }
     }
 
     setIsGenerating(true);
     setProgress(0);
-    setStatus(`GENERATING ${params.resolution}×${params.resolution} // ${params.noiseType.toUpperCase()}`);
-    setStatText(`${params.resolution}×${params.resolution} — this may take a moment...`);
+    setStatus(`GENERATING ${w}×${h} // ${params.noiseType.toUpperCase()}`);
+    setStatText(`${w}×${h} — this may take a moment...`);
 
     const t0 = performance.now();
     
-    // Cleanup old worker
     if (workerRef.current) workerRef.current.terminate();
     
-    // Create new worker
     const worker = new NoiseWorker();
     workerRef.current = worker;
 
@@ -125,7 +164,6 @@ export default function App() {
         const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
         const { rgba, width, height } = msg;
 
-        // Draw preview
         if (canvasRef.current) {
           const canvas = canvasRef.current;
           const pw = Math.min(width, 512);
@@ -135,20 +173,14 @@ export default function App() {
           const ctx = canvas.getContext('2d');
           
           if (ctx) {
-            if (width <= 512) {
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = width;
+            tempCanvas.height = height;
+            const tempCtx = tempCanvas.getContext('2d');
+            if (tempCtx) {
               const id = new ImageData(rgba, width, height);
-              ctx.putImageData(id, 0, 0);
-            } else {
-              // Downscale using a temporary canvas
-              const tempCanvas = document.createElement('canvas');
-              tempCanvas.width = width;
-              tempCanvas.height = height;
-              const tempCtx = tempCanvas.getContext('2d');
-              if (tempCtx) {
-                const id = new ImageData(rgba, width, height);
-                tempCtx.putImageData(id, 0, 0);
-                ctx.drawImage(tempCanvas, 0, 0, pw, ph);
-              }
+              tempCtx.putImageData(id, 0, 0);
+              ctx.drawImage(tempCanvas, 0, 0, pw, ph);
             }
           }
         }
@@ -172,8 +204,46 @@ export default function App() {
       setProgress(0);
     };
 
-    worker.postMessage({ ...params, width: params.resolution, height: params.resolution });
-  }, [params, isGenerating]);
+    worker.postMessage({ 
+      ...params, 
+      width: w, 
+      height: h, 
+      baseImage: baseImage 
+    });
+  }, [params, isGenerating, baseImage]);
+
+  // Live updates with debounce
+  useEffect(() => {
+    if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    
+    // For live updates, we generate at a lower resolution if the target is high
+    const liveW = params.width > 1024 ? 512 : params.width;
+    const liveH = params.height > 1024 ? 512 : params.height;
+
+    debounceTimer.current = setTimeout(() => {
+      generate({ w: liveW, h: liveH });
+    }, 300);
+
+    return () => {
+      if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    };
+  }, [
+    params.noiseType, 
+    params.scale, 
+    params.octaves, 
+    params.persistence, 
+    params.lacunarity, 
+    params.threshold, 
+    params.contrast, 
+    params.bias, 
+    params.spread, 
+    params.seed, 
+    params.invert, 
+    params.seamless,
+    params.imageIntensity,
+    params.noiseIntensity,
+    baseImage
+  ]);
 
   const downloadPNG = async () => {
     if (!currentResult) return;
@@ -201,12 +271,6 @@ export default function App() {
     }, 'image/png');
   };
 
-  // Initial generation
-  useEffect(() => {
-    generate();
-    return () => workerRef.current?.terminate();
-  }, []);
-
   return (
     <div className="flex flex-col h-screen bg-[#080808] text-[#b8b8b8] font-sans overflow-hidden selection:bg-[#c8a030] selection:text-black">
       {/* Header */}
@@ -221,7 +285,7 @@ export default function App() {
 
       <main className="flex flex-1 overflow-hidden">
         {/* Sidebar */}
-        <aside className="w-68 bg-[#0e0e0e] border-r border-[#262626] overflow-y-auto shrink-0 flex flex-col scrollbar-thin scrollbar-thumb-[#262626] scrollbar-track-transparent">
+        <aside className="w-72 bg-[#0e0e0e] border-r border-[#262626] overflow-y-auto shrink-0 flex flex-col scrollbar-thin scrollbar-thumb-[#262626] scrollbar-track-transparent">
           
           {/* Noise Type & Presets */}
           <section className="p-4 border-b border-[#1a1a1a]">
@@ -253,15 +317,99 @@ export default function App() {
           {/* Resolution */}
           <section className="p-4 border-b border-[#1a1a1a]">
             <h3 className="font-mono text-[9px] tracking-[2px] uppercase text-[#7a5f18] mb-3 flex items-center gap-2">
-              <Maximize2 size={10} /> Output Resolution
+              <Maximize2 size={10} /> Resolution
             </h3>
+            <div className="grid grid-cols-2 gap-2 mb-3">
+              <div>
+                <span className="text-[9px] uppercase text-[#606060] block mb-1">Width</span>
+                <input 
+                  type="number" 
+                  value={params.width}
+                  onChange={(e) => updateParam('width', parseInt(e.target.value) || 1)}
+                  className="w-full bg-[#141414] text-[#f0f0f0] border border-[#262626] p-2 font-mono text-xs outline-none focus:border-[#c8a030]"
+                />
+              </div>
+              <div>
+                <span className="text-[9px] uppercase text-[#606060] block mb-1">Height</span>
+                <input 
+                  type="number" 
+                  value={params.height}
+                  onChange={(e) => updateParam('height', parseInt(e.target.value) || 1)}
+                  className="w-full bg-[#141414] text-[#f0f0f0] border border-[#262626] p-2 font-mono text-xs outline-none focus:border-[#c8a030]"
+                />
+              </div>
+            </div>
             <select 
-              value={params.resolution}
-              onChange={(e) => updateParam('resolution', parseInt(e.target.value))}
+              onChange={(e) => {
+                const res = parseInt(e.target.value);
+                updateParam('width', res);
+                updateParam('height', res);
+              }}
               className="w-full bg-[#141414] text-[#f0f0f0] border border-[#262626] p-2 font-mono text-xs outline-none focus:border-[#c8a030] cursor-pointer appearance-none bg-[url('data:image/svg+xml,%3Csvg_xmlns=%22http://www.w3.org/2000/svg%22_width=%2210%22_height=%226%22%3E%3Cpath_d=%22M0_0l5_6_5-6z%22_fill=%22%23606060%22/%3E%3C/svg%3E')] bg-no-repeat bg-[right_10px_center]"
             >
+              <option value="">Quick Presets...</option>
               {RESOLUTIONS.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
             </select>
+          </section>
+
+          {/* Image Import */}
+          <section className="p-4 border-b border-[#1a1a1a]">
+            <h3 className="font-mono text-[9px] tracking-[2px] uppercase text-[#7a5f18] mb-3 flex items-center gap-2">
+              <ImageIcon size={10} /> Image Heightmap
+            </h3>
+            <div className="flex flex-col gap-3">
+              <label className="w-full cursor-pointer group">
+                <div className="w-full border border-dashed border-[#262626] group-hover:border-[#c8a030] p-4 flex flex-col items-center justify-center gap-2 transition-colors">
+                  <Upload size={16} className="text-[#606060] group-hover:text-[#c8a030]" />
+                  <span className="text-[10px] uppercase tracking-wider text-[#606060]">Import Image</span>
+                </div>
+                <input 
+                  type="file" 
+                  accept="image/*" 
+                  className="hidden" 
+                  onChange={(e) => e.target.files?.[0] && processImage(e.target.files[0])}
+                />
+              </label>
+
+              {imagePreview && (
+                <div className="relative group">
+                  <img src={imagePreview} alt="Preview" className="w-full h-24 object-cover border border-[#262626]" />
+                  <button 
+                    onClick={() => { setBaseImage(null); setImagePreview(null); }}
+                    className="absolute top-1 right-1 bg-black/80 p-1 text-[#606060] hover:text-white transition-colors"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              )}
+
+              <div className="space-y-3">
+                <div>
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="text-[10px] font-semibold tracking-wider uppercase text-[#606060]">Image Intensity</span>
+                    <span className="font-mono text-[10px] text-[#c8a030]">{params.imageIntensity.toFixed(2)}</span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="2" step="0.01"
+                    value={params.imageIntensity}
+                    onChange={(e) => updateParam('imageIntensity', parseFloat(e.target.value))}
+                    className="w-full h-0.5 bg-[#262626] appearance-none outline-none cursor-pointer accent-[#c8a030]"
+                  />
+                </div>
+                <div>
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="text-[10px] font-semibold tracking-wider uppercase text-[#606060]">Noise Intensity</span>
+                    <span className="font-mono text-[10px] text-[#c8a030]">{params.noiseIntensity.toFixed(2)}</span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="2" step="0.01"
+                    value={params.noiseIntensity}
+                    onChange={(e) => updateParam('noiseIntensity', parseFloat(e.target.value))}
+                    className="w-full h-0.5 bg-[#262626] appearance-none outline-none cursor-pointer accent-[#c8a030]"
+                  />
+                </div>
+              </div>
+            </div>
           </section>
 
           {/* Parameters */}
@@ -271,7 +419,7 @@ export default function App() {
             </h3>
             
             {[
-              { label: 'Scale', key: 'scale', min: 0.5, max: 12, step: 0.1, dec: 1 },
+              { label: 'Scale', key: 'scale', min: 0.5, max: 24, step: 0.1, dec: 1 },
               { label: 'Octaves', key: 'octaves', min: 1, max: 12, step: 1, dec: 0 },
               { label: 'Persistence', key: 'persistence', min: 0.1, max: 0.95, step: 0.01, dec: 2 },
               { label: 'Lacunarity', key: 'lacunarity', min: 1.0, max: 4.0, step: 0.05, dec: 2 },
@@ -353,12 +501,12 @@ export default function App() {
           {/* Action Buttons */}
           <section className="p-4 mt-auto flex flex-col gap-2">
             <button 
-              onClick={generate}
+              onClick={() => generate()}
               className={`w-full py-2.5 font-bold text-xs tracking-[2px] uppercase transition-all flex items-center justify-center gap-2 ${
                 isGenerating ? 'bg-[#4a2020] text-[#f0a0a0]' : 'bg-[#c8a030] text-black hover:bg-[#f0f0f0]'
               }`}
             >
-              {isGenerating ? <><X size={14} /> Cancel</> : <><Play size={14} /> Generate</>}
+              {isGenerating ? <><X size={14} /> Cancel</> : <><RefreshCw size={14} /> Full Render</>}
             </button>
             <button 
               onClick={downloadPNG}

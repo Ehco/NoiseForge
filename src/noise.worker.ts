@@ -242,7 +242,8 @@ function dilateQuery(psd: any, x: number, y: number, r: number) {
 self.onmessage = function(e) {
   const p = e.data;
   const {width: W, height: H, noiseType, scale, octaves, persistence, lacunarity,
-         threshold, contrast, bias, spread, seed, invert, seamless} = p;
+         threshold, contrast, bias, spread, seed, invert, seamless,
+         baseImage, imageIntensity = 1.0, noiseIntensity = 1.0} = p;
 
   const sn = new SimplexNoise4D(seed);
   const totalPixels = W*H;
@@ -269,7 +270,7 @@ self.onmessage = function(e) {
           case 'worley_f2f1':v=nWorley(sx,sy,scale,seed,seamless,'f2f1'); break;
           default:           v=nFbm(sn,sx,sy,scale,octaves,persistence,lacunarity,seamless);
         }
-        raw[y*W+x] = v;
+        raw[y*W+x] = v * noiseIntensity;
       }
     }
     if ((rowStart/CHUNK) % 8 === 0) {
@@ -282,6 +283,15 @@ self.onmessage = function(e) {
   for (let i=0;i<totalPixels;i++){if(raw[i]<mn)mn=raw[i];if(raw[i]>mx)mx=raw[i];}
   const rng = mx-mn || 1;
   for (let i=0;i<totalPixels;i++) raw[i]=(raw[i]-mn)/rng;
+
+  // Blend with base image if provided
+  if (baseImage) {
+    for (let i = 0; i < totalPixels; i++) {
+      // baseImage is expected to be a grayscale Uint8Array of size W*H
+      const imgVal = baseImage[i] / 255.0;
+      raw[i] = (raw[i] * noiseIntensity + imgVal * imageIntensity) / (noiseIntensity + imageIntensity || 1);
+    }
+  }
 
   self.postMessage({type:'progress', progress: 0.75});
 
