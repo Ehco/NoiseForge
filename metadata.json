@@ -1,0 +1,5 @@
+{
+  "name": "NoiseForge",
+  "description": "A high-performance displacement map and noise generator with multiple algorithms and seamless tiling support.",
+  "requestFramePermissions": []
+}
