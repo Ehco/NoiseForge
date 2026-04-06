@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Settings, Download, Play, X, Info, Layers, Maximize2, RefreshCw, Check, AlertCircle, Upload, Image as ImageIcon, Copy, LayoutGrid, Trash2, Plus, Minus } from 'lucide-react';
+import { Settings, Download, Play, X, Info, Layers, Maximize2, RefreshCw, Check, AlertCircle, Upload, Image as ImageIcon, Copy, LayoutGrid, Trash2, Plus, Minus, Edit3 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import NoiseWorker from './noise.worker?worker';
 
@@ -19,6 +19,20 @@ const NOISE_TYPES = [
   { id: 'domain_warp', name: 'Domain Warped fBm' },
   { id: 'swiss', name: 'Swiss Turbulence' },
   { id: 'jordan', name: 'Jordan Multifractal' },
+];
+
+const SHAPE_TYPES = [
+  { id: 'circle', name: 'Circle' },
+  { id: 'square', name: 'Square' },
+  { id: 'triangle', name: 'Triangle' },
+  { id: 'hexagon', name: 'Hexagon' },
+  { id: 'diamond', name: 'Diamond' },
+  { id: 'slash_f', name: 'Slash /' },
+  { id: 'slash_b', name: 'Slash \\' },
+  { id: 'knurling', name: 'Knurling' },
+  { id: 'pegboard', name: 'Pegboard' },
+  { id: 'custom', name: 'Custom' },
+  { id: 'text', name: 'Text/Emoji' }
 ];
 
 const RESOLUTIONS = [
@@ -62,9 +76,35 @@ interface NoiseLayer {
   visible: boolean;
 }
 
+interface TextureShape {
+  id: string;
+  type: 'circle' | 'square' | 'triangle' | 'hexagon' | 'slash_f' | 'slash_b' | 'diamond' | 'knurling' | 'pegboard' | 'custom' | 'text';
+  size: number;
+  scaleX: number;
+  scaleY: number;
+  posX: number;
+  posY: number;
+  roundness: number;
+  rotation: number;
+  depth: number;
+  text?: string;
+  textData?: Uint8Array | null;
+  isCollapsed?: boolean;
+}
+
+interface TextureSettings {
+  shapes: TextureShape[];
+  spacingX: number;
+  spacingY: number;
+  stagger: boolean;
+  linkSizeSpacing: boolean;
+  customShapeData: Uint8Array | null;
+}
+
 interface NoiseParams {
   width: number;
   height: number;
+  linkResolution: boolean;
   layers: NoiseLayer[];
   threshold: number;
   contrast: number;
@@ -73,7 +113,12 @@ interface NoiseParams {
   seamless: boolean;
   invert: boolean;
   imageIntensity: number;
+  activeTab: 'noise' | 'texture' | 'image';
+  textureSettings: TextureSettings;
+  applyPostToTexture: boolean;
 }
+
+const PREVIEW_LIMIT = 1024;
 
 interface BatchSettings {
   enabled: boolean;
@@ -85,12 +130,35 @@ interface BatchSettings {
   randomizeSpread: boolean;
 }
 
+const DEFAULT_TEXTURE: TextureSettings = {
+  shapes: [
+    { 
+      id: '1', 
+      type: 'circle', 
+      size: 128, 
+      scaleX: 1,
+      scaleY: 1,
+      posX: 0.5, 
+      posY: 0.5, 
+      roundness: 0, 
+      rotation: 0, 
+      depth: 1.0,
+      isCollapsed: false
+    }
+  ],
+  spacingX: 512,
+  spacingY: 512,
+  stagger: false,
+  linkSizeSpacing: false,
+  customShapeData: null,
+};
+
 const DEFAULT_LAYER: NoiseLayer = {
   id: '1',
   noiseType: 'fbm',
   scale: 3.0,
   octaves: 24,
-  persistence: 0.55,
+  persistence: 0.90,
   lacunarity: 2.0,
   seed: 42,
   intensity: 1.0,
@@ -102,20 +170,30 @@ const DEFAULT_LAYER: NoiseLayer = {
 const DEFAULT_PARAMS: NoiseParams = {
   width: 512,
   height: 512,
+  linkResolution: true,
   layers: [DEFAULT_LAYER],
   threshold: 0.50,
-  contrast: 3.0,
+  contrast: 50.0,
   bias: 0.0,
   spread: 0,
   seamless: true,
   invert: false,
   imageIntensity: 1.0,
+  activeTab: 'noise',
+  textureSettings: DEFAULT_TEXTURE,
+  applyPostToTexture: false,
 };
 
 // --- Components ---
 const Slider = ({ label, value, min, max, step, onChange, onReset, defaultValue, tooltip, dec = 2 }: any) => {
   const [isEditing, setIsEditing] = useState(false);
   const [tempValue, setTempValue] = useState(value.toString());
+  const [isDragging, setIsDragging] = useState(false);
+  const startX = useRef(0);
+  const startVal = useRef(0);
+  const dragThreshold = 5;
+  const hasMoved = useRef(false);
+  const clickTimer = useRef<any>(null);
 
   useEffect(() => {
     if (!isEditing) setTempValue(value.toString());
@@ -135,8 +213,49 @@ const Slider = ({ label, value, min, max, step, onChange, onReset, defaultValue,
     }
   };
 
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (isEditing) return;
+    if (e.detail === 2) {
+      if (clickTimer.current) clearTimeout(clickTimer.current);
+      onReset();
+      return;
+    }
+    startX.current = e.clientX;
+    startVal.current = value;
+    hasMoved.current = false;
+    
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const deltaX = moveEvent.clientX - startX.current;
+      if (Math.abs(deltaX) > dragThreshold) {
+        hasMoved.current = true;
+        setIsDragging(true);
+        document.body.style.cursor = 'ew-resize';
+        const newValue = startVal.current + deltaX * step * 0.5;
+        const clamped = Math.max(min, Math.min(max, newValue));
+        onChange(clamped);
+      }
+    };
+    
+    const handleMouseUp = () => {
+      if (isDragging) {
+        setIsDragging(false);
+        document.body.style.cursor = 'default';
+      } else if (!hasMoved.current && e.detail === 1) {
+        // Single click - wait a bit to ensure it's not a double click
+        clickTimer.current = setTimeout(() => {
+          setIsEditing(true);
+        }, 200);
+      }
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+    
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  };
+
   return (
-    <div className="space-y-1.5 group/slider">
+    <div className="space-y-1.5 group/slider select-none">
       <div className="flex justify-between items-center">
         <div className="flex items-center gap-1.5">
           <span className="text-[10px] uppercase tracking-wider text-[#606060] group-hover/slider:text-[#b8b8b8] transition-colors">{label}</span>
@@ -161,10 +280,10 @@ const Slider = ({ label, value, min, max, step, onChange, onReset, defaultValue,
           />
         ) : (
           <span 
-            className="text-[10px] font-mono text-[#c8a030] cursor-pointer hover:text-white transition-colors"
+            className={`text-[10px] font-mono transition-colors ${isDragging ? 'text-white' : 'text-[#c8a030] hover:text-white'} cursor-ew-resize`}
+            onMouseDown={handleMouseDown}
             onDoubleClick={onReset}
-            onClick={() => setIsEditing(true)}
-            title="Click to edit, Double-click to reset"
+            title="Drag to scrub, Click to edit, Double-click to reset"
           >
             {value.toFixed(dec)}
           </span>
@@ -180,6 +299,7 @@ const Slider = ({ label, value, min, max, step, onChange, onReset, defaultValue,
         <input 
           type="range" min={min} max={max} step={step} value={value}
           onChange={(e) => onChange(parseFloat(e.target.value))}
+          onDoubleClick={onReset}
           className="w-full h-1 bg-[#1a1a1a] rounded-full appearance-none cursor-pointer accent-[#c8a030] hover:accent-[#f0f0f0] transition-all relative z-10"
         />
       </div>
@@ -229,6 +349,11 @@ const CollapsibleSection = ({ isOpen, onToggle, title, icon: Icon, children }: a
 
 export default function App() {
   const [params, setParams] = useState<NoiseParams>(DEFAULT_PARAMS);
+  const [tabStates, setTabStates] = useState<Record<string, NoiseParams>>({
+    noise: { ...DEFAULT_PARAMS, activeTab: 'noise' },
+    texture: { ...DEFAULT_PARAMS, activeTab: 'texture' },
+    image: { ...DEFAULT_PARAMS, activeTab: 'image' },
+  });
   const [activeLayerId, setActiveLayerId] = useState<string>('1');
   const [defaultParams, setDefaultParams] = useState<NoiseParams>(DEFAULT_PARAMS);
   const [zoom, setZoom] = useState(1);
@@ -272,12 +397,27 @@ export default function App() {
     setCollapsedSections(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
+  const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const workerRef = useRef<Worker | null>(null);
   const debounceTimer = useRef<NodeJS.Timeout | null>(null);
 
   const updateParam = (key: keyof NoiseParams, value: any) => {
-    setParams(prev => ({ ...prev, [key]: value }));
+    if (key === 'activeTab') {
+      const nextTab = value as 'noise' | 'texture' | 'image';
+      setTabStates(prev => ({ ...prev, [params.activeTab]: params }));
+      setParams(tabStates[nextTab]);
+      return;
+    }
+    setParams(prev => {
+      const next = { ...prev, [key]: value };
+      if (prev.linkResolution) {
+        if (key === 'width') next.height = value;
+        if (key === 'height') next.width = value;
+      }
+      return next;
+    });
   };
 
   const updateBatchSetting = (key: keyof BatchSettings, value: any) => {
@@ -347,6 +487,83 @@ export default function App() {
     setDefaultParams(newParams);
   };
 
+  const updateTextureSetting = (key: keyof TextureSettings, value: any) => {
+    setParams(prev => {
+      const nextSettings = { ...prev.textureSettings, [key]: value };
+      if (prev.textureSettings.linkSizeSpacing) {
+        if (key === 'spacingX') {
+          nextSettings.spacingY = value;
+        } else if (key === 'spacingY') {
+          nextSettings.spacingX = value;
+        }
+      }
+      return {
+        ...prev,
+        textureSettings: nextSettings
+      };
+    });
+  };
+
+  const updateTextureShape = (id: string, key: keyof TextureShape, value: any) => {
+    setParams(prev => {
+      const nextShapes = prev.textureSettings.shapes.map(s => s.id === id ? { ...s, [key]: value } : s);
+      return {
+        ...prev,
+        textureSettings: { ...prev.textureSettings, shapes: nextShapes }
+      };
+    });
+  };
+
+  const addTextureShape = () => {
+    setParams(prev => {
+      const newShape: TextureShape = {
+        id: Math.random().toString(36).substr(2, 9),
+        type: 'circle',
+        size: 128,
+        scaleX: 1,
+        scaleY: 1,
+        posX: 0.5,
+        posY: 0.5,
+        roundness: 0,
+        rotation: 0,
+        depth: 1.0,
+        isCollapsed: false
+      };
+      return {
+        ...prev,
+        textureSettings: { ...prev.textureSettings, shapes: [...prev.textureSettings.shapes, newShape] }
+      };
+    });
+  };
+
+  const removeTextureShape = (id: string) => {
+    setParams(prev => {
+      if (prev.textureSettings.shapes.length <= 1) return prev;
+      return {
+        ...prev,
+        textureSettings: { ...prev.textureSettings, shapes: prev.textureSettings.shapes.filter(s => s.id !== id) }
+      };
+    });
+  };
+
+  const processCustomShape = async (file: File) => {
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    await new Promise(resolve => img.onload = resolve);
+    const canvas = document.createElement('canvas');
+    canvas.width = 64;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.drawImage(img, 0, 0, 64, 64);
+    const imageData = ctx.getImageData(0, 0, 64, 64);
+    const grayscale = new Uint8Array(64 * 64);
+    for (let i = 0; i < imageData.data.length; i += 4) {
+      grayscale[i / 4] = 0.299 * imageData.data[i] + 0.587 * imageData.data[i + 1] + 0.114 * imageData.data[i + 2];
+    }
+    updateTextureSetting('customShapeData', grayscale);
+  };
+
   const activeLayer = params.layers.find(l => l.id === activeLayerId) || params.layers[0];
 
   const processImage = async (file: File) => {
@@ -370,6 +587,79 @@ export default function App() {
     }
     
     setBaseImage(grayscale);
+  };
+
+  useEffect(() => {
+    if (imagePreview) {
+      const img = new Image();
+      img.src = imagePreview;
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = params.width;
+        canvas.height = params.height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.drawImage(img, 0, 0, params.width, params.height);
+        const imageData = ctx.getImageData(0, 0, params.width, params.height);
+        const grayscale = new Uint8Array(params.width * params.height);
+        for (let i = 0; i < imageData.data.length; i += 4) {
+          grayscale[i / 4] = 0.299 * imageData.data[i] + 0.587 * imageData.data[i + 1] + 0.114 * imageData.data[i + 2];
+        }
+        setBaseImage(grayscale);
+      };
+    }
+  }, [params.width, params.height]);
+
+  const handleCanvasMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (params.activeTab !== 'texture') return;
+    
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    
+    // Find closest shape
+    let closestId: string | null = null;
+    let minDistance = 0.1; // Selection radius
+    
+    params.textureSettings.shapes.forEach(shape => {
+      const dx = x - shape.posX;
+      const dy = y - shape.posY;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < minDistance) {
+        minDistance = dist;
+        closestId = shape.id;
+      }
+    });
+    
+    if (closestId) {
+      setSelectedShapeId(closestId);
+      setIsDragging(true);
+      // Expand the shape in the sidebar if it was collapsed
+      updateTextureShape(closestId, 'isCollapsed', false);
+    } else {
+      setSelectedShapeId(null);
+    }
+  };
+
+  const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!isDragging || !selectedShapeId || params.activeTab !== 'texture') return;
+    
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const y = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+    
+    updateTextureShape(selectedShapeId, 'posX', x);
+    updateTextureShape(selectedShapeId, 'posY', y);
+  };
+
+  const handleCanvasMouseUp = () => {
+    setIsDragging(false);
   };
 
   const generate = useCallback(async (forceResolution?: { w: number, h: number }) => {
@@ -575,9 +865,15 @@ export default function App() {
   useEffect(() => {
     if (debounceTimer.current) clearTimeout(debounceTimer.current);
     
-    // For live updates, we generate at a lower resolution if the target is high
-    const liveW = params.width > 1024 ? 512 : params.width;
-    const liveH = params.height > 1024 ? 512 : params.height;
+    // Performance Optimization: Downscale preview if resolution is too high
+    let liveW = params.width;
+    let liveH = params.height;
+    
+    if (liveW > PREVIEW_LIMIT || liveH > PREVIEW_LIMIT) {
+      const ratio = Math.min(PREVIEW_LIMIT / liveW, PREVIEW_LIMIT / liveH);
+      liveW = Math.floor(liveW * ratio);
+      liveH = Math.floor(liveH * ratio);
+    }
 
     debounceTimer.current = setTimeout(() => {
       generate({ w: liveW, h: liveH });
@@ -594,8 +890,64 @@ export default function App() {
     params.spread, 
     params.seamless,
     params.imageIntensity,
+    params.activeTab,
+    params.textureSettings,
+    params.applyPostToTexture,
+    params.width,
+    params.height,
     baseImage
   ]);
+
+  // Render text shapes to data
+  useEffect(() => {
+    params.textureSettings.shapes.forEach(shape => {
+      if (shape.type === 'text' && shape.text) {
+        const canvas = document.createElement('canvas');
+        canvas.width = 128;
+        canvas.height = 128;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.fillStyle = 'black';
+          ctx.fillRect(0, 0, 128, 128);
+          ctx.fillStyle = 'white';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          
+          // Fix text clipping: measure and scale to fit
+          ctx.font = 'bold 80px sans-serif';
+          const metrics = ctx.measureText(shape.text);
+          const textWidth = metrics.width;
+          if (textWidth > 110) {
+            const scale = 110 / textWidth;
+            ctx.font = `bold ${Math.floor(80 * scale)}px sans-serif`;
+          }
+          
+          ctx.fillText(shape.text, 64, 64);
+          const imageData = ctx.getImageData(0, 0, 128, 128);
+          const grayscale = new Uint8Array(128 * 128);
+          for (let i = 0; i < 128 * 128; i++) {
+            grayscale[i] = imageData.data[i * 4];
+          }
+          
+          // Only update if data is different to avoid loops
+          const currentData = shape.textData;
+          let isDifferent = !currentData || currentData.length !== grayscale.length;
+          if (!isDifferent && currentData) {
+            for (let i = 0; i < grayscale.length; i++) {
+              if (currentData[i] !== grayscale[i]) {
+                isDifferent = true;
+                break;
+              }
+            }
+          }
+
+          if (isDifferent) {
+            updateTextureShape(shape.id, 'textData', grayscale);
+          }
+        }
+      }
+    });
+  }, [params.textureSettings.shapes]);
 
   const downloadPNG = async (result?: any) => {
     const target = result || currentResult;
@@ -719,6 +1071,28 @@ export default function App() {
         </div>
       </header>
 
+      {/* Tabs */}
+      <div className="flex bg-[#0e0e0e] border-b border-[#262626] shrink-0">
+        {[
+          { id: 'noise', name: 'Noise Generator', icon: RefreshCw },
+          { id: 'texture', name: 'Texture Generator', icon: LayoutGrid },
+          { id: 'image', name: 'Image Heightmap', icon: ImageIcon },
+        ].map(tab => (
+          <button
+            key={tab.id}
+            onClick={() => updateParam('activeTab', tab.id as any)}
+            className={`flex-1 py-3 flex items-center justify-center gap-2 font-mono text-[10px] uppercase tracking-[2px] transition-all border-b-2 ${
+              params.activeTab === tab.id 
+                ? 'text-[#c8a030] border-[#c8a030] bg-[#161616]' 
+                : 'text-[#606060] border-transparent hover:text-[#b8b8b8] hover:bg-[#111]'
+            }`}
+          >
+            <tab.icon size={12} />
+            <span className="hidden sm:inline">{tab.name}</span>
+          </button>
+        ))}
+      </div>
+
       <main className="flex flex-1 overflow-hidden">
         {/* Preview Area */}
         <section 
@@ -786,27 +1160,35 @@ export default function App() {
               <div className="relative max-w-full max-h-full group">
                 <canvas 
                   ref={canvasRef}
-                  className="block max-w-full max-h-full border border-[#262626] shadow-[0_0_40px_rgba(0,0,0,0.8)] [image-rendering:pixelated]"
+                  className={`block max-w-full max-h-full border border-[#262626] shadow-[0_0_40px_rgba(0,0,0,0.8)] [image-rendering:pixelated] ${params.activeTab === 'texture' ? 'cursor-crosshair' : ''}`}
+                  onMouseDown={handleCanvasMouseDown}
+                  onMouseMove={handleCanvasMouseMove}
+                  onMouseUp={handleCanvasMouseUp}
+                  onMouseLeave={handleCanvasMouseUp}
                 />
                 
-                {/* Single Preview Hover Controls */}
-                <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-3 pointer-events-none group-hover:pointer-events-auto">
+                {/* Single Preview Buttons (Bottom Left) */}
+                <div className="absolute bottom-4 left-4 flex items-center gap-2 z-20">
                   <button 
                     onClick={() => downloadPNG()}
-                    className="px-4 py-2 bg-[#c8a030] text-black font-bold text-xs uppercase tracking-[2px] flex items-center gap-2 hover:bg-white transition-all transform translate-y-2 group-hover:translate-y-0"
+                    className="p-2 bg-[#0e0e0e]/80 backdrop-blur-md border border-[#262626] text-[#c8a030] hover:text-white hover:bg-[#c8a030] transition-all rounded shadow-xl"
+                    title="Download PNG"
                   >
-                    <Download size={14} /> Download PNG
+                    <Download size={16} />
                   </button>
-                  <button 
-                    onClick={() => copyParamsToClipboard(params)}
-                    className="px-4 py-2 bg-[#1c1c1c] text-[#c8a030] border border-[#c8a030] font-bold text-xs uppercase tracking-[2px] flex items-center gap-2 hover:bg-[#c8a030] hover:text-black transition-all transform translate-y-2 group-hover:translate-y-0"
-                  >
-                    <Copy size={14} /> Copy Params
-                  </button>
+                  {params.activeTab === 'noise' && (
+                    <button 
+                      onClick={() => copyParamsToClipboard(params)}
+                      className="p-2 bg-[#0e0e0e]/80 backdrop-blur-md border border-[#262626] text-[#c8a030] hover:text-white hover:bg-[#c8a030] transition-all rounded shadow-xl"
+                      title="Copy Parameters"
+                    >
+                      <Copy size={16} />
+                    </button>
+                  )}
                 </div>
 
                 <div className="absolute -bottom-6 right-0 font-mono text-[10px] text-[#606060]">
-                  {previewInfo}
+                  {`${params.width} × ${params.height}`}
                 </div>
               </div>
             )}
@@ -857,212 +1239,545 @@ export default function App() {
           </div>
         </section>
 
-        {/* Sidebar (Right) */}
-        <aside className="w-80 bg-[#0e0e0e] border-l border-[#262626] overflow-y-auto shrink-0 flex flex-col scrollbar-thin scrollbar-thumb-[#262626] scrollbar-track-transparent">
-          
-          <CollapsibleSection id="presets" title="Presets" icon={Settings} isOpen={!collapsedSections.presets} onToggle={() => toggleSection('presets')}>
-            <div className="grid grid-cols-2 gap-2">
-              {Object.entries(PRESETS).map(([name, preset]) => (
-                <button 
-                  key={name}
-                  type="button"
-                  onClick={() => applyPreset(name as any)}
-                  className="px-3 py-2 bg-[#141414] border border-[#262626] text-[10px] font-mono text-[#b8b8b8] uppercase tracking-wider hover:border-[#c8a030] hover:text-[#c8a030] transition-all text-left flex items-center justify-between group"
-                >
-                  {name}
-                  <Play size={8} className="opacity-0 group-hover:opacity-100 transition-opacity" />
-                </button>
-              ))}
-            </div>
-          </CollapsibleSection>
-
-          <CollapsibleSection id="layers" title="Layers" icon={Layers} isOpen={!collapsedSections.layers} onToggle={() => toggleSection('layers')}>
-            <div className="flex justify-between items-center mb-3">
+        {/* Texture Shapes Sidebar (Left of Main Sidebar) */}
+        {params.activeTab === 'texture' && (
+          <aside className="w-[300px] bg-[#0a0a0a] border-l border-[#262626] flex flex-col shrink-0 overflow-y-auto custom-scrollbar">
+            <div className="p-4 border-b border-[#1a1a1a] flex items-center justify-between bg-[#0e0e0e]">
+              <div className="flex items-center gap-2">
+                <LayoutGrid size={14} className="text-[#c8a030]" />
+                <h3 className="font-mono text-[10px] tracking-[2px] uppercase text-[#c8a030]">Shapes</h3>
+              </div>
               <button 
-                onClick={addLayer}
-                className="flex items-center gap-2 px-3 py-1.5 bg-[#c8a030]/10 border border-[#c8a030]/30 text-[#c8a030] font-mono text-[9px] uppercase hover:bg-[#c8a030]/20 transition-colors w-full justify-center"
+                onClick={addTextureShape}
+                className="p-1.5 bg-[#c8a030]/10 text-[#c8a030] border border-[#c8a030]/20 hover:bg-[#c8a030] hover:text-black transition-all rounded"
+                title="Add Shape"
               >
-                <Plus size={10} /> Add New Layer
+                <Plus size={14} />
               </button>
             </div>
-            <div className="space-y-1 max-h-60 overflow-y-auto pr-1 custom-scrollbar">
-              {params.layers.map((layer, idx) => (
-                <div 
-                  key={layer.id}
-                  onClick={() => setActiveLayerId(layer.id)}
-                  className={`flex items-center justify-between p-2 border ${activeLayerId === layer.id ? 'border-[#c8a030] bg-[#1c1c1c]' : 'border-[#262626] bg-[#141414]'} cursor-pointer hover:border-[#444] transition-colors`}
-                >
-                  <div className="flex items-center gap-2 overflow-hidden">
-                    <span className="font-mono text-[9px] text-[#606060]">{idx + 1}</span>
-                    <span className="font-mono text-[10px] text-[#b8b8b8] truncate">{NOISE_TYPES.find(t => t.id === layer.noiseType)?.name}</span>
+            
+            <div className="flex-1 p-4 space-y-4">
+              {params.textureSettings.shapes.map((shape, index) => (
+                <div key={shape.id} className="bg-[#111] border border-[#262626] overflow-hidden">
+                  <div 
+                    className="p-3 flex items-center justify-between cursor-pointer hover:bg-[#161616] transition-colors"
+                    onClick={() => updateTextureShape(shape.id, 'isCollapsed', !shape.isCollapsed)}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-[9px] font-mono text-[#606060]">{index + 1}</span>
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-[#b8b8b8]">
+                        {SHAPE_TYPES.find(t => t.id === shape.type)?.name}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button 
+                        onClick={(e) => { e.stopPropagation(); removeTextureShape(shape.id); }}
+                        className="p-1 text-[#444] hover:text-red-500 transition-colors"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                      <motion.div animate={{ rotate: shape.isCollapsed ? -90 : 0 }}>
+                        <Plus size={10} className="text-[#606060]" />
+                      </motion.div>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <button 
-                      onClick={(e) => { e.stopPropagation(); updateLayer(layer.id, 'visible', !layer.visible); }}
-                      className={`p-1 ${layer.visible ? 'text-[#c8a030]' : 'text-[#444]'}`}
-                    >
-                      <Check size={10} />
-                    </button>
-                    <button 
-                      onClick={(e) => { e.stopPropagation(); removeLayer(layer.id); }}
-                      className="p-1 text-[#606060] hover:text-red-500"
-                    >
-                      <Trash2 size={10} />
-                    </button>
-                  </div>
+
+                  <AnimatePresence>
+                    {!shape.isCollapsed && (
+                      <motion.div 
+                        initial={{ height: 0 }}
+                        animate={{ height: 'auto' }}
+                        exit={{ height: 0 }}
+                        className="overflow-hidden"
+                      >
+                        <div className="p-4 pt-0 space-y-4 border-t border-[#1a1a1a]/50">
+                          <div className="grid grid-cols-3 gap-1 py-3">
+                            {SHAPE_TYPES.map(st => (
+                              <button 
+                                key={st.id}
+                                onClick={() => updateTextureShape(shape.id, 'type', st.id)}
+                                className={`p-1.5 border text-[8px] uppercase transition-all ${shape.type === st.id ? 'border-[#c8a030] text-[#c8a030] bg-[#c8a030]/10' : 'border-[#1a1a1a] text-[#444] hover:border-[#333]'}`}
+                              >
+                                {st.name}
+                              </button>
+                            ))}
+                          </div>
+
+                          {shape.type === 'text' && (
+                            <div className="space-y-2">
+                              <label className="text-[9px] uppercase tracking-wider text-[#606060]">Text / Emoji</label>
+                              <input 
+                                type="text"
+                                value={shape.text || ''}
+                                onChange={(e) => updateTextureShape(shape.id, 'text', e.target.value)}
+                                className="w-full bg-[#050505] border border-[#262626] text-xs p-2 outline-none focus:border-[#c8a030] transition-colors text-white"
+                                placeholder="Enter text..."
+                              />
+                            </div>
+                          )}
+
+                          <Slider 
+                            label="Size" value={shape.size} min={1} max={params.width * 2} step={1} 
+                            onChange={(v: number) => updateTextureShape(shape.id, 'size', v)}
+                            onReset={() => updateTextureShape(shape.id, 'size', 128)}
+                            defaultValue={128}
+                          />
+
+                          <div className="grid grid-cols-2 gap-4">
+                            <Slider 
+                              label="Width %" value={shape.scaleX * 100} min={1} max={500} step={1} 
+                              onChange={(v: number) => updateTextureShape(shape.id, 'scaleX', v / 100)}
+                              onReset={() => updateTextureShape(shape.id, 'scaleX', 1)}
+                              defaultValue={100}
+                            />
+                            <Slider 
+                              label="Height %" value={shape.scaleY * 100} min={1} max={500} step={1} 
+                              onChange={(v: number) => updateTextureShape(shape.id, 'scaleY', v / 100)}
+                              onReset={() => updateTextureShape(shape.id, 'scaleY', 1)}
+                              defaultValue={100}
+                            />
+                          </div>
+                          
+                          <div className="grid grid-cols-2 gap-4">
+                            <Slider 
+                              label="Pos X" value={shape.posX} min={0} max={1} step={0.01} 
+                              onChange={(v: number) => updateTextureShape(shape.id, 'posX', v)}
+                              onReset={() => updateTextureShape(shape.id, 'posX', 0.5)}
+                              defaultValue={0.5}
+                            />
+                            <Slider 
+                              label="Pos Y" value={shape.posY} min={0} max={1} step={0.01} 
+                              onChange={(v: number) => updateTextureShape(shape.id, 'posY', v)}
+                              onReset={() => updateTextureShape(shape.id, 'posY', 0.5)}
+                              defaultValue={0.5}
+                            />
+                          </div>
+
+                          <Slider 
+                            label="Roundness" value={shape.roundness} min={0} max={100} step={1} 
+                            onChange={(v: number) => updateTextureShape(shape.id, 'roundness', v)}
+                            onReset={() => updateTextureShape(shape.id, 'roundness', 0)}
+                            defaultValue={0}
+                          />
+                          <Slider 
+                            label="Rotation" value={shape.rotation} min={0} max={360} step={1} 
+                            onChange={(v: number) => updateTextureShape(shape.id, 'rotation', v)}
+                            onReset={() => updateTextureShape(shape.id, 'rotation', 0)}
+                            defaultValue={0}
+                          />
+                          <Slider 
+                            label="Depth" value={shape.depth} min={0} max={1} step={0.01} 
+                            onChange={(v: number) => updateTextureShape(shape.id, 'depth', v)}
+                            onReset={() => updateTextureShape(shape.id, 'depth', 1.0)}
+                            defaultValue={1.0}
+                          />
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </div>
               ))}
             </div>
-          </CollapsibleSection>
+          </aside>
+        )}
 
-          <CollapsibleSection id="activeLayer" title={`Layer ${params.layers.findIndex(l => l.id === activeLayerId) + 1} Settings`} icon={Settings} isOpen={!collapsedSections.activeLayer} onToggle={() => toggleSection('activeLayer')}>
-            <div className="space-y-4">
-              <div className="flex justify-between items-center">
-                <span className="text-[9px] uppercase text-[#606060]">Noise Type</span>
-                <button 
-                  onClick={() => randomizeSeed(activeLayerId)}
-                  className="p-1 text-[#606060] hover:text-[#c8a030]"
-                  title="Randomize Seed"
-                >
-                  <RefreshCw size={10} />
-                </button>
-              </div>
-              <select 
-                value={activeLayer.noiseType}
-                onChange={(e) => updateLayer(activeLayerId, 'noiseType', e.target.value)}
-                className="w-full bg-[#141414] text-[#f0f0f0] border border-[#262626] p-2 font-mono text-xs outline-none focus:border-[#c8a030] cursor-pointer appearance-none bg-[url('data:image/svg+xml,%3Csvg_xmlns=%22http://www.w3.org/2000/svg%22_width=%2210%22_height=%226%22%3E%3Cpath_d=%22M0_0l5_6_5-6z%22_fill=%22%23606060%22/%3E%3C/svg%3E')] bg-no-repeat bg-[right_10px_center]"
+        {/* Sidebar (Right) */}
+        <aside className="w-[320px] bg-[#0e0e0e] border-l border-[#262626] flex flex-col shrink-0 overflow-y-auto custom-scrollbar">
+          {params.activeTab === 'noise' && (
+            <>
+              <CollapsibleSection 
+                isOpen={!collapsedSections.presets} 
+                onToggle={() => toggleSection('presets')}
+                title="Presets" 
+                icon={LayoutGrid}
               >
-                {NOISE_TYPES.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-              </select>
-
-              {activeLayer.noiseType !== 'perlin' && (
-                <div className="grid grid-cols-2 gap-4">
-                  <Slider 
-                    label="Octaves" value={activeLayer.octaves} min={1} max={12} step={1} dec={0}
-                    onChange={(v) => updateLayer(activeLayerId, 'octaves', v)}
-                    onReset={() => resetLayerParam(activeLayerId, 'octaves')}
-                    defaultValue={DEFAULT_LAYER.octaves}
-                    tooltip="Number of noise layers combined for detail."
-                  />
-                  <Slider 
-                    label="Persistence" value={activeLayer.persistence} min={0.1} max={0.9} step={0.01}
-                    onChange={(v) => updateLayer(activeLayerId, 'persistence', v)}
-                    onReset={() => resetLayerParam(activeLayerId, 'persistence')}
-                    defaultValue={DEFAULT_LAYER.persistence}
-                    tooltip="How much each octave contributes to the final shape."
-                  />
+                <div className="grid grid-cols-2 gap-2">
+                  {Object.keys(PRESETS).map((key) => (
+                    <button
+                      key={key}
+                      onClick={() => applyPreset(key as any)}
+                      className="p-2 bg-[#161616] border border-[#262626] hover:border-[#c8a030] hover:bg-[#1c1c1c] transition-all text-left group"
+                    >
+                      <div className="text-[9px] font-mono text-[#606060] group-hover:text-[#c8a030] uppercase tracking-wider">{key}</div>
+                    </button>
+                  ))}
                 </div>
-              )}
+              </CollapsibleSection>
 
-              <Slider 
-                label="Scale" value={activeLayer.scale} min={0.1} max={20} step={0.1} dec={1}
-                onChange={(v) => updateLayer(activeLayerId, 'scale', v)}
-                onReset={() => resetLayerParam(activeLayerId, 'scale')}
-                defaultValue={DEFAULT_LAYER.scale}
-                tooltip="Size of the noise features. Lower = larger blobs."
-              />
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <span className="text-[9px] uppercase text-[#606060] block mb-1">Blend Mode</span>
-                  <select 
-                    value={activeLayer.blendMode}
-                    onChange={(e) => updateLayer(activeLayerId, 'blendMode', e.target.value)}
-                    className="w-full bg-[#141414] text-[#f0f0f0] border border-[#262626] p-1.5 font-mono text-[10px] outline-none focus:border-[#c8a030]"
-                  >
-                    <option value="normal">Normal</option>
-                    <option value="add">Add</option>
-                    <option value="subtract">Subtract</option>
-                    <option value="multiply">Multiply</option>
-                    <option value="screen">Screen</option>
-                    <option value="overlay">Overlay</option>
-                  </select>
-                </div>
-                <Slider 
-                  label="Opacity" value={activeLayer.intensity} min={0} max={1} step={0.01}
-                  onChange={(v) => updateLayer(activeLayerId, 'intensity', v)}
-                  onReset={() => resetLayerParam(activeLayerId, 'intensity')}
-                  defaultValue={1.0}
-                />
-              </div>
-
-              <div>
-                <span className="text-[9px] uppercase text-[#606060] block mb-1">Seed</span>
-                <div className="flex gap-2">
-                  <input 
-                    type="number" 
-                    value={activeLayer.seed}
-                    onChange={(e) => updateLayer(activeLayerId, 'seed', parseInt(e.target.value) || 0)}
-                    className="flex-1 bg-[#141414] text-[#f0f0f0] border border-[#262626] p-1.5 font-mono text-xs outline-none focus:border-[#c8a030]"
-                  />
+              <CollapsibleSection 
+                isOpen={!collapsedSections.layers} 
+                onToggle={() => toggleSection('layers')}
+                title="Layers" 
+                icon={Layers}
+              >
+                <div className="space-y-2">
+                  {params.layers.map((layer, idx) => (
+                    <div 
+                      key={layer.id}
+                      onClick={() => setActiveLayerId(layer.id)}
+                      className={`p-3 border transition-all cursor-pointer flex items-center justify-between group ${
+                        activeLayerId === layer.id 
+                          ? 'bg-[#1c1c1c] border-[#c8a030]' 
+                          : 'bg-[#161616] border-[#262626] hover:border-[#444]'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="text-[10px] font-mono text-[#606060]">{idx + 1}</div>
+                        <div className="flex flex-col">
+                          <span className={`text-[10px] font-bold uppercase tracking-wider ${activeLayerId === layer.id ? 'text-white' : 'text-[#b8b8b8]'}`}>
+                            {NOISE_TYPES.find(t => t.id === layer.noiseType)?.name || 'Noise'}
+                          </span>
+                          <span className="text-[9px] text-[#606060] font-mono">S:{layer.seed} I:{layer.intensity.toFixed(1)}</span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button 
+                          onClick={(e) => { e.stopPropagation(); updateLayer(layer.id, 'visible', !layer.visible); }}
+                          className={`p-1.5 hover:bg-[#333] rounded transition-colors ${layer.visible ? 'text-[#c8a030]' : 'text-[#444]'}`}
+                        >
+                          <Maximize2 size={12} />
+                        </button>
+                        <button 
+                          onClick={(e) => { e.stopPropagation(); removeLayer(layer.id); }}
+                          className="p-1.5 hover:bg-[#333] text-[#606060] hover:text-red-500 rounded transition-colors"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
                   <button 
-                    onClick={() => updateLayer(activeLayerId, 'invert', !activeLayer.invert)}
-                    className={`px-2 py-1 font-mono text-[9px] border ${activeLayer.invert ? 'border-[#c8a030] text-[#c8a030]' : 'border-[#262626] text-[#606060]'} uppercase`}
+                    onClick={addLayer}
+                    className="w-full p-2 border border-dashed border-[#333] hover:border-[#c8a030] hover:bg-[#161616] text-[#606060] hover:text-[#c8a030] transition-all flex items-center justify-center gap-2 text-[10px] uppercase tracking-[2px]"
                   >
-                    Invert
+                    <Plus size={12} /> Add Layer
                   </button>
                 </div>
-              </div>
-            </div>
-          </CollapsibleSection>
+              </CollapsibleSection>
 
-          <CollapsibleSection id="resolution" title="Resolution" icon={Maximize2} isOpen={!collapsedSections.resolution} onToggle={() => toggleSection('resolution')}>
+              <CollapsibleSection 
+                isOpen={!collapsedSections.activeLayer} 
+                onToggle={() => toggleSection('activeLayer')}
+                title="Active Layer Settings" 
+                icon={Settings}
+              >
+                <div className="space-y-6">
+                  <div className="space-y-2">
+                    <label className="text-[10px] uppercase tracking-wider text-[#606060]">Noise Type</label>
+                    <select 
+                      value={activeLayer.noiseType}
+                      onChange={(e) => updateLayer(activeLayer.id, 'noiseType', e.target.value)}
+                      className="w-full bg-[#161616] border border-[#262626] text-[10px] p-2 outline-none focus:border-[#c8a030] transition-colors font-mono uppercase"
+                    >
+                      {NOISE_TYPES.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                    </select>
+                  </div>
+
+                  <Slider 
+                    label="Scale" value={activeLayer.scale} min={0.1} max={100} step={0.1} 
+                    onChange={(v: number) => updateLayer(activeLayer.id, 'scale', v)}
+                    onReset={() => resetLayerParam(activeLayer.id, 'scale')}
+                    defaultValue={DEFAULT_LAYER.scale}
+                    tooltip="Base frequency of the noise. Higher values = smaller features."
+                  />
+                  <Slider 
+                    label="Octaves" value={activeLayer.octaves} min={1} max={24} step={1} 
+                    onChange={(v: number) => updateLayer(activeLayer.id, 'octaves', v)}
+                    onReset={() => resetLayerParam(activeLayer.id, 'octaves')}
+                    defaultValue={DEFAULT_LAYER.octaves}
+                    dec={0}
+                    tooltip="Number of layers of noise combined. Higher = more detail."
+                  />
+                  <Slider 
+                    label="Persistence" value={activeLayer.persistence} min={0} max={1} step={0.01} 
+                    onChange={(v: number) => updateLayer(activeLayer.id, 'persistence', v)}
+                    onReset={() => resetLayerParam(activeLayer.id, 'persistence')}
+                    defaultValue={DEFAULT_LAYER.persistence}
+                    tooltip="How much each octave contributes. Higher = rougher texture."
+                  />
+                  <Slider 
+                    label="Lacunarity" value={activeLayer.lacunarity} min={1} max={4} step={0.01} 
+                    onChange={(v: number) => updateLayer(activeLayer.id, 'lacunarity', v)}
+                    onReset={() => resetLayerParam(activeLayer.id, 'lacunarity')}
+                    defaultValue={DEFAULT_LAYER.lacunarity}
+                    tooltip="Frequency multiplier for each octave."
+                  />
+                  <Slider 
+                    label="Intensity" value={activeLayer.intensity} min={0} max={2} step={0.01} 
+                    onChange={(v: number) => updateLayer(activeLayer.id, 'intensity', v)}
+                    onReset={() => resetLayerParam(activeLayer.id, 'intensity')}
+                    defaultValue={DEFAULT_LAYER.intensity}
+                    tooltip="Overall strength of this layer."
+                  />
+
+                  <div className="flex items-center justify-between pt-2">
+                    <div className="flex items-center gap-2">
+                      <button 
+                        onClick={() => randomizeSeed(activeLayer.id)}
+                        className="p-2 bg-[#161616] border border-[#262626] hover:border-[#c8a030] text-[#606060] hover:text-[#c8a030] transition-all"
+                        title="Randomize Seed"
+                      >
+                        <RefreshCw size={14} />
+                      </button>
+                      <div className="flex flex-col">
+                        <span className="text-[9px] uppercase tracking-wider text-[#606060]">Seed</span>
+                        <span className="text-[11px] font-mono text-white">{activeLayer.seed}</span>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <button 
+                        onClick={() => updateLayer(activeLayer.id, 'invert', !activeLayer.invert)}
+                        className={`text-[10px] uppercase tracking-widest font-bold transition-colors ${activeLayer.invert ? 'text-[#c8a030]' : 'text-[#444] hover:text-[#606060]'}`}
+                      >
+                        Invert
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </CollapsibleSection>
+            </>
+          )}
+
+          {params.activeTab === 'texture' && (
+            <CollapsibleSection 
+              isOpen={!collapsedSections.texture} 
+              onToggle={() => toggleSection('texture')}
+              title="Texture Generator" 
+              icon={LayoutGrid}
+            >
+              <div className="space-y-6">
+                <div className="space-y-4">
+                  <h4 className="text-[10px] uppercase tracking-widest text-[#606060]">Grid Settings</h4>
+                  <div className="grid grid-cols-2 gap-4">
+                    <Slider 
+                      label="Spacing X" value={params.textureSettings.spacingX} min={1} max={params.width} step={1} 
+                      onChange={(v: number) => updateTextureSetting('spacingX', v)}
+                      onReset={() => updateTextureSetting('spacingX', params.width)}
+                      defaultValue={params.width}
+                    />
+                    <Slider 
+                      label="Spacing Y" value={params.textureSettings.spacingY} min={1} max={params.height} step={1} 
+                      onChange={(v: number) => updateTextureSetting('spacingY', v)}
+                      onReset={() => updateTextureSetting('spacingY', params.height)}
+                      defaultValue={params.height}
+                    />
+                  </div>
+
+                  <div className="space-y-3 pt-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] uppercase text-[#606060]">Link Spacing</span>
+                      <button 
+                        onClick={() => updateTextureSetting('linkSizeSpacing', !params.textureSettings.linkSizeSpacing)}
+                        className={`w-8 h-4 rounded-full relative transition-colors ${params.textureSettings.linkSizeSpacing ? 'bg-[#c8a030]' : 'bg-[#262626]'}`}
+                      >
+                        <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${params.textureSettings.linkSizeSpacing ? 'left-4.5' : 'left-0.5'}`} />
+                      </button>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] uppercase text-[#606060]">Stagger Grid</span>
+                      <button 
+                        onClick={() => updateTextureSetting('stagger', !params.textureSettings.stagger)}
+                        className={`w-8 h-4 rounded-full relative transition-colors ${params.textureSettings.stagger ? 'bg-[#c8a030]' : 'bg-[#262626]'}`}
+                      >
+                        <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${params.textureSettings.stagger ? 'left-4.5' : 'left-0.5'}`} />
+                      </button>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] uppercase text-[#606060]">Apply Post-Process</span>
+                      <button 
+                        onClick={() => updateParam('applyPostToTexture', !params.applyPostToTexture)}
+                        className={`w-8 h-4 rounded-full relative transition-colors ${params.applyPostToTexture ? 'bg-[#c8a030]' : 'bg-[#262626]'}`}
+                      >
+                        <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${params.applyPostToTexture ? 'left-4.5' : 'left-0.5'}`} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {params.textureSettings.shapes.some(s => s.type === 'custom') && (
+                  <div className="space-y-3 pt-4 border-t border-[#262626]">
+                    <div className="flex items-center justify-between">
+                      <label className="text-[10px] uppercase tracking-wider text-[#606060]">Custom Shape (64x64)</label>
+                      <button 
+                        onClick={() => {
+                          const empty = new Uint8Array(64 * 64).fill(0);
+                          updateTextureSetting('customShapeData', empty);
+                        }}
+                        className="text-[9px] text-red-500 hover:text-red-400 transition-colors uppercase"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                    
+                    <div className="flex gap-2">
+                      <div 
+                        className="relative group border-2 border-dashed border-[#262626] hover:border-[#c8a030] transition-all p-4 flex-1 flex flex-col items-center justify-center gap-2 bg-[#0a0a0a] cursor-pointer"
+                        onClick={() => document.getElementById('custom-shape-upload')?.click()}
+                      >
+                        <input 
+                          id="custom-shape-upload"
+                          type="file" 
+                          accept="image/*" 
+                          onChange={(e) => e.target.files?.[0] && processCustomShape(e.target.files[0])}
+                          className="hidden"
+                        />
+                        <div className="flex flex-col items-center gap-1 text-[#444] group-hover:text-[#c8a030]">
+                          <Upload size={16} />
+                          <span className="text-[9px] uppercase">Upload</span>
+                        </div>
+                      </div>
+                      
+                      <div className="w-16 h-16 bg-[#0a0a0a] border border-[#262626] relative overflow-hidden group/draw">
+                        {params.textureSettings.customShapeData ? (
+                          <canvas 
+                            width={64} height={64}
+                            ref={(el) => {
+                              if (el && params.textureSettings.customShapeData) {
+                                const ctx = el.getContext('2d');
+                                if (ctx) {
+                                  const imgData = ctx.createImageData(64, 64);
+                                  for (let i = 0; i < 64 * 64; i++) {
+                                    const v = params.textureSettings.customShapeData[i];
+                                    imgData.data[i * 4] = v;
+                                    imgData.data[i * 4 + 1] = v;
+                                    imgData.data[i * 4 + 2] = v;
+                                    imgData.data[i * 4 + 3] = 255;
+                                  }
+                                  ctx.putImageData(imgData, 0, 0);
+                                }
+                              }
+                            }}
+                            className="w-full h-full [image-rendering:pixelated]"
+                          />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-[#262626]">
+                            <Edit3 size={16} />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </CollapsibleSection>
+          )}
+
+          {params.activeTab === 'image' && (
+            <CollapsibleSection 
+              isOpen={true} 
+              onToggle={() => {}}
+              title="Image Heightmap" 
+              icon={ImageIcon}
+            >
+              <div className="space-y-4">
+                <div 
+                  className="relative group border-2 border-dashed border-[#262626] hover:border-[#c8a030] transition-all p-4 flex flex-col items-center justify-center gap-3 bg-[#0a0a0a]"
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    const file = e.dataTransfer.files[0];
+                    if (file) processImage(file);
+                  }}
+                >
+                  <input 
+                    type="file" 
+                    accept="image/*" 
+                    onChange={(e) => e.target.files?.[0] && processImage(e.target.files[0])}
+                    className="absolute inset-0 opacity-0 cursor-pointer z-10"
+                  />
+                  {imagePreview ? (
+                    <img src={imagePreview} className="w-full aspect-square object-cover rounded border border-[#262626]" alt="Preview" />
+                  ) : (
+                    <div className="flex flex-col items-center gap-2 text-[#606060] group-hover:text-[#c8a030]">
+                      <Upload size={24} />
+                      <span className="text-[10px] uppercase tracking-[2px]">Drop or Click</span>
+                    </div>
+                  )}
+                </div>
+                {baseImage && (
+                  <div className="space-y-4">
+                    <Slider 
+                      label="Image Intensity" value={params.imageIntensity} min={0} max={2} step={0.01} 
+                      onChange={(v: number) => updateParam('imageIntensity', v)}
+                      onReset={() => updateParam('imageIntensity', 1.0)}
+                      defaultValue={1.0}
+                      tooltip="How much the base image influences the final noise."
+                    />
+                    <button 
+                      onClick={() => { setBaseImage(null); setImagePreview(null); }}
+                      className="w-full p-2 bg-red-900/20 text-red-500 border border-red-900/50 hover:bg-red-900/40 transition-all text-[9px] uppercase tracking-[2px]"
+                    >
+                      Clear Image
+                    </button>
+                  </div>
+                )}
+              </div>
+            </CollapsibleSection>
+          )}
+
+          <CollapsibleSection 
+            isOpen={!collapsedSections.resolution} 
+            onToggle={() => toggleSection('resolution')}
+            title="Resolution" 
+            icon={Maximize2}
+          >
             <div className="grid grid-cols-2 gap-2">
               {RESOLUTIONS.map(res => (
                 <button 
                   key={res.id}
                   onClick={() => {
                     const size = parseInt(res.id);
-                    updateParam('width', size);
-                    updateParam('height', size);
+                    setParams(prev => {
+                      const next = { ...prev, width: size, height: size };
+                      if (prev.activeTab === 'texture') {
+                        next.textureSettings = {
+                          ...prev.textureSettings,
+                          spacingX: size,
+                          spacingY: size
+                        };
+                      }
+                      return next;
+                    });
                   }}
-                  className={`px-2 py-1.5 border font-mono text-[10px] uppercase transition-all ${params.width === parseInt(res.id) ? 'border-[#c8a030] text-[#c8a030] bg-[#c8a030]/5' : 'border-[#262626] text-[#606060] hover:border-[#444]'}`}
+                  className={`p-2 border text-[10px] font-mono transition-all ${
+                    params.width === parseInt(res.id) && params.height === parseInt(res.id)
+                      ? 'bg-[#c8a030] text-black border-[#c8a030]' 
+                      : 'bg-[#161616] border-[#262626] text-[#606060] hover:border-[#444]'
+                  }`}
                 >
                   {res.name}
                 </button>
               ))}
             </div>
-          </CollapsibleSection>
-
-          <CollapsibleSection id="heightmap" title="Image Heightmap" icon={ImageIcon} isOpen={!collapsedSections.image} onToggle={() => toggleSection('image')}>
-            <div className="space-y-4">
-              <div 
-                className="border-2 border-dashed border-[#262626] hover:border-[#c8a030] transition-colors p-4 flex flex-col items-center justify-center gap-2 cursor-pointer relative group"
-                onClick={() => document.getElementById('file-upload')?.click()}
-              >
+            
+            <div className="relative flex items-center gap-3 pt-4 border-t border-[#262626] mt-4">
+              <div className="flex-1 space-y-1.5">
+                <label className="text-[9px] uppercase tracking-wider text-[#606060]">Width</label>
                 <input 
-                  id="file-upload"
-                  type="file" 
-                  className="hidden" 
-                  accept="image/*"
-                  onChange={(e) => e.target.files?.[0] && processImage(e.target.files[0])}
+                  type="number"
+                  value={params.width}
+                  onChange={(e) => updateParam('width', parseInt(e.target.value) || 0)}
+                  className="w-full bg-[#161616] border border-[#262626] text-[11px] font-mono text-white p-2 outline-none focus:border-[#c8a030]"
                 />
-                {imagePreview ? (
-                  <div className="relative group/img">
-                    <img src={imagePreview} className="w-full h-32 object-contain opacity-50 group-hover:opacity-80 transition-opacity" />
-                    <button 
-                      onClick={(e) => { e.stopPropagation(); setBaseImage(null); setImagePreview(null); }}
-                      className="absolute top-1 right-1 bg-black/80 p-1 text-[#606060] hover:text-white transition-colors opacity-0 group-hover/img:opacity-100"
-                    >
-                      <X size={12} />
-                    </button>
-                  </div>
-                ) : (
-                  <>
-                    <Upload size={20} className="text-[#333]" />
-                    <span className="text-[10px] uppercase text-[#444] text-center">Drop image to use as base heightmap</span>
-                  </>
-                )}
               </div>
-              {baseImage && (
-                <Slider 
-                  label="Image Influence" value={params.imageIntensity} min={0} max={2} step={0.01}
-                  onChange={(v) => updateParam('imageIntensity', v)}
-                  onReset={() => updateParam('imageIntensity', 1.0)}
-                  defaultValue={1.0}
-                  tooltip="How strongly the uploaded image affects the noise."
+              
+              <button 
+                onClick={() => setParams(prev => ({ ...prev, linkResolution: !prev.linkResolution }))}
+                className={`mt-5 w-8 h-4 rounded-full relative transition-colors ${params.linkResolution ? 'bg-[#c8a030]' : 'bg-[#262626]'}`}
+                title={params.linkResolution ? "Unlink Aspect Ratio" : "Link Aspect Ratio"}
+              >
+                <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${params.linkResolution ? 'left-4.5' : 'left-0.5'}`} />
+              </button>
+
+              <div className="flex-1 space-y-1.5">
+                <label className="text-[9px] uppercase tracking-wider text-[#606060]">Height</label>
+                <input 
+                  type="number"
+                  value={params.height}
+                  onChange={(e) => updateParam('height', parseInt(e.target.value) || 0)}
+                  className="w-full bg-[#161616] border border-[#262626] text-[11px] font-mono text-white p-2 outline-none focus:border-[#c8a030]"
                 />
-              )}
+              </div>
             </div>
           </CollapsibleSection>
 
@@ -1088,8 +1803,8 @@ export default function App() {
               <Slider 
                 label="Island Contrast" value={params.contrast} min={0} max={extremeSettings ? 200 : 100} step={0.1} dec={1}
                 onChange={(v) => updateParam('contrast', v)}
-                onReset={() => updateParam('contrast', 20)}
-                defaultValue={20}
+                onReset={() => updateParam('contrast', 50)}
+                defaultValue={50}
                 tooltip="Controls the sharpness of the island edges. Lower values create softer, more gradient-like transitions."
               />
               <Slider 

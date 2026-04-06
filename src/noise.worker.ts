@@ -241,66 +241,243 @@ function dilateQuery(psd: any, x: number, y: number, r: number) {
   return sum>0?255:0;
 }
 
+// ---- Texture Generation ----
+function sdRoundRect(x: number, y: number, w: number, h: number, r: number) {
+  const dx = Math.abs(x) - w + r;
+  const dy = Math.abs(y) - h + r;
+  return Math.min(Math.max(dx, dy), 0) + Math.sqrt(Math.max(dx, 0) ** 2 + Math.max(dy, 0) ** 2) - r;
+}
+
+function sdCircle(x: number, y: number, r: number) {
+  return Math.sqrt(x * x + y * y) - r;
+}
+
+function sdEquilateralTriangle(x: number, y: number, r: number) {
+  const k = Math.sqrt(3);
+  x = Math.abs(x) - r;
+  y = y + r / k;
+  if (x + k * y > 0) {
+    const tx = (x - k * y) / 2;
+    const ty = (-k * x - y) / 2;
+    x = tx; y = ty;
+  }
+  x -= Math.max(-2 * r, Math.min(0, x));
+  return -Math.sqrt(x * x + y * y) * Math.sign(y);
+}
+
+function sdHexagon(x: number, y: number, r: number) {
+  const k = [0.866025404, 0.5, 0.577350269]; // sqrt(3)/2, 1/2, 1/sqrt(3)
+  x = Math.abs(x);
+  y = Math.abs(y);
+  x -= Math.min(x * k[0] + y * k[1], r) * k[0] * 2;
+  y -= Math.min(x * k[0] + y * k[1], r) * k[1] * 2;
+  x -= r;
+  return Math.sqrt(x * x + y * y) * Math.sign(x);
+}
+
+function rotate(x: number, y: number, angle: number) {
+  const s = Math.sin(angle);
+  const c = Math.cos(angle);
+  return [x * c - y * s, x * s + y * c];
+}
+
+function generateTexture(W: number, H: number, s: any) {
+  const data = new Float32Array(W * H);
+  const { shapes, spacingX, spacingY, stagger, customShapeData } = s;
+
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      let combinedVal = 0;
+      
+      let tx = x;
+      let ty = y;
+      
+      const row = Math.floor(ty / spacingY);
+      if (stagger && row % 2 === 1) {
+        tx += spacingX / 2;
+      }
+
+      const px = ((tx % spacingX) + spacingX) % spacingX - spacingX / 2;
+      const py = ((ty % spacingY) + spacingY) % spacingY - spacingY / 2;
+      
+      for (const shapeObj of shapes) {
+        const { type, size, roundness, rotation, depth, posX = 0.5, posY = 0.5, scaleX = 1, scaleY = 1, textData } = shapeObj;
+        
+        // Offset relative to cell center (0,0)
+        const ox = px - (posX - 0.5) * spacingX;
+        const oy = py - (posY - 0.5) * spacingY;
+        
+        const rad = rotation * Math.PI / 180;
+        const [rx, ry] = rotate(ox, oy, rad);
+        
+        // Apply non-uniform scale
+        const sx = rx / scaleX;
+        const sy = ry / scaleY;
+        
+        const r = size / 2;
+        const round = (roundness / 100) * r;
+
+        let d = 1e10;
+        let isCustom = false;
+        let customVal = 0;
+
+        switch (type) {
+          case 'circle':
+            d = sdCircle(sx, sy, r);
+            break;
+          case 'square':
+            d = sdRoundRect(sx, sy, r - round, r - round, round);
+            break;
+          case 'triangle':
+            d = sdEquilateralTriangle(sx, sy, r);
+            if (round > 0) d -= round;
+            break;
+          case 'hexagon':
+            d = sdHexagon(sx, sy, r);
+            if (round > 0) d -= round;
+            break;
+          case 'slash_f':
+          case 'slash_b': {
+            const isForward = type === 'slash_f';
+            const angle = isForward ? Math.PI / 4 : -Math.PI / 4;
+            const [rsx, rsy] = rotate(ox, oy, angle + rad);
+            const ssx = rsx / scaleX;
+            const ssy = rsy / scaleY;
+            d = sdRoundRect(ssx, ssy, r, r / 4, r / 4);
+            break;
+          }
+          case 'diamond': {
+            const rowIdx = Math.floor(ty / spacingY);
+            const colIdx = Math.floor(tx / spacingX);
+            const angle = (rowIdx + colIdx) % 2 === 0 ? Math.PI / 4 : -Math.PI / 4;
+            const [rsx, rsy] = rotate(ox, oy, angle + rad);
+            const ssx = rsx / scaleX;
+            const ssy = rsy / scaleY;
+            d = sdRoundRect(ssx, ssy, r, r / 3, r / 3);
+            break;
+          }
+          case 'knurling': {
+            const dist = Math.max(Math.abs(sx), Math.abs(sy));
+            customVal = Math.max(0, 1 - dist / r) * depth;
+            isCustom = true;
+            break;
+          }
+          case 'pegboard':
+            d = sdCircle(sx, sy, r);
+            break;
+          case 'custom':
+            if (customShapeData) {
+              const res = Math.sqrt(customShapeData.length);
+              const cx = Math.floor(((sx / size) + 0.5) * res);
+              const cy = Math.floor(((sy / size) + 0.5) * res);
+              if (cx >= 0 && cx < res && cy >= 0 && cy < res) {
+                customVal = (customShapeData[cy * res + cx] / 255) * depth;
+              }
+              isCustom = true;
+            }
+            break;
+          case 'text':
+            if (textData) {
+              const res = Math.sqrt(textData.length);
+              const cx = Math.floor(((sx / size) + 0.5) * res);
+              const cy = Math.floor(((sy / size) + 0.5) * res);
+              if (cx >= 0 && cx < res && cy >= 0 && cy < res) {
+                customVal = (textData[cy * res + cx] / 255) * depth;
+              }
+              isCustom = true;
+            }
+            break;
+        }
+
+        let shapeVal = 0;
+        if (isCustom) {
+          shapeVal = customVal;
+        } else {
+          // Sharp edge with anti-aliasing
+          const edge = 0.5;
+          const mask = 1.0 - Math.max(0, Math.min(1, (d + edge) / (edge * 2)));
+          shapeVal = mask * depth;
+        }
+        
+        // Combine using Max (Union)
+        combinedVal = Math.max(combinedVal, shapeVal);
+      }
+      data[y * W + x] = combinedVal;
+    }
+  }
+  return data;
+}
+
 // ---- Main generation ----
 self.onmessage = function(e) {
   const p = e.data;
   const {width: W, height: H, layers, threshold, contrast, bias, spread, seamless,
-         baseImage, imageIntensity = 1.0, invert} = p;
+         baseImage, imageIntensity = 1.0, invert, activeTab, textureSettings, applyPostToTexture} = p;
 
   const totalPixels = W*H;
-  const combined = new Float32Array(totalPixels);
+  let combined = new Float32Array(totalPixels);
 
-  // Initialize with base image if provided
-  if (baseImage) {
-    for (let i = 0; i < totalPixels; i++) {
-      combined[i] = (baseImage[i] / 255.0) * imageIntensity;
-    }
-  }
-
-  const blend = (b: number, f: number, mode: string, opacity: number) => {
-    let res = f;
-    if (mode === 'add') res = b + f;
-    else if (mode === 'subtract') res = b - f;
-    else if (mode === 'multiply') res = b * f;
-    else if (mode === 'screen') res = 1 - (1 - b) * (1 - f);
-    else if (mode === 'overlay') res = b < 0.5 ? 2 * b * f : 1 - 2 * (1 - b) * (1 - f);
-    return b * (1 - opacity) + res * opacity;
-  };
-
-  layers.forEach((layer: any, lIdx: number) => {
-    const sn = new SimplexNoise4D(layer.seed);
-    for (let y = 0; y < H; y++) {
-      const sy = y / H;
-      for (let x = 0; x < W; x++) {
-        const sx = x / W;
-        let v;
-        switch(layer.noiseType) {
-          case 'perlin':     v=nSingle(sn,sx,sy,layer.scale,seamless); break;
-          case 'fbm':        v=nFbm(sn,sx,sy,layer.scale,layer.octaves,layer.persistence,layer.lacunarity,seamless); break;
-          case 'ridged':     v=nRidged(sn,sx,sy,layer.scale,layer.octaves,layer.persistence,layer.lacunarity,seamless); break;
-          case 'billow':     v=nBillow(sn,sx,sy,layer.scale,layer.octaves,layer.persistence,layer.lacunarity,seamless); break;
-          case 'domain_warp':v=nDomainWarp(sn,sx,sy,layer.scale,layer.octaves,layer.persistence,layer.lacunarity,seamless); break;
-          case 'swiss':      v=nSwiss(sn,sx,sy,layer.scale,layer.octaves,layer.persistence,layer.lacunarity,seamless); break;
-          case 'jordan':     v=nJordan(sn,sx,sy,layer.scale,layer.octaves,layer.persistence,layer.lacunarity,seamless); break;
-          case 'worley_f1':  v=nWorley(sx,sy,layer.scale,layer.seed,seamless,'f1'); break;
-          case 'worley_f2f1':v=nWorley(sx,sy,layer.scale,layer.seed,seamless,'f2f1'); break;
-          default:           v=nFbm(sn,sx,sy,layer.scale,layer.octaves,layer.persistence,layer.lacunarity,seamless);
-        }
-        
-        // Normalize to [0, 1]
-        v = (v + 1) / 2;
-        if (layer.invert) v = 1 - v;
-
-        const idx = y * W + x;
-        if (lIdx === 0 && !baseImage) {
-          combined[idx] = v * layer.intensity;
-        } else {
-          combined[idx] = blend(combined[idx], v, layer.blendMode || 'normal', layer.intensity);
-        }
+  if (activeTab === 'texture') {
+    combined = generateTexture(W, H, textureSettings);
+  } else if (activeTab === 'image') {
+    if (baseImage) {
+      for (let i = 0; i < totalPixels; i++) {
+        combined[i] = (baseImage[i] / 255.0) * imageIntensity;
       }
     }
-    self.postMessage({type:'progress', progress: (lIdx + 1) / layers.length * 0.7});
-  });
+  } else {
+    // Initialize with base image if provided (only in image tab)
+    if (baseImage && activeTab === 'image') {
+      for (let i = 0; i < totalPixels; i++) {
+        combined[i] = (baseImage[i] / 255.0) * imageIntensity;
+      }
+    }
+
+    const blend = (b: number, f: number, mode: string, opacity: number) => {
+      let res = f;
+      if (mode === 'add') res = b + f;
+      else if (mode === 'subtract') res = b - f;
+      else if (mode === 'multiply') res = b * f;
+      else if (mode === 'screen') res = 1 - (1 - b) * (1 - f);
+      else if (mode === 'overlay') res = b < 0.5 ? 2 * b * f : 1 - 2 * (1 - b) * (1 - f);
+      return b * (1 - opacity) + res * opacity;
+    };
+
+    layers.forEach((layer: any, lIdx: number) => {
+      const sn = new SimplexNoise4D(layer.seed);
+      for (let y = 0; y < H; y++) {
+        const sy = y / H;
+        for (let x = 0; x < W; x++) {
+          const sx = x / W;
+          let v;
+          switch(layer.noiseType) {
+            case 'perlin':     v=nSingle(sn,sx,sy,layer.scale,seamless); break;
+            case 'fbm':        v=nFbm(sn,sx,sy,layer.scale,layer.octaves,layer.persistence,layer.lacunarity,seamless); break;
+            case 'ridged':     v=nRidged(sn,sx,sy,layer.scale,layer.octaves,layer.persistence,layer.lacunarity,seamless); break;
+            case 'billow':     v=nBillow(sn,sx,sy,layer.scale,layer.octaves,layer.persistence,layer.lacunarity,seamless); break;
+            case 'domain_warp':v=nDomainWarp(sn,sx,sy,layer.scale,layer.octaves,layer.persistence,layer.lacunarity,seamless); break;
+            case 'swiss':      v=nSwiss(sn,sx,sy,layer.scale,layer.octaves,layer.persistence,layer.lacunarity,seamless); break;
+            case 'jordan':     v=nJordan(sn,sx,sy,layer.scale,layer.octaves,layer.persistence,layer.lacunarity,seamless); break;
+            case 'worley_f1':  v=nWorley(sx,sy,layer.scale,layer.seed,seamless,'f1'); break;
+            case 'worley_f2f1':v=nWorley(sx,sy,layer.scale,layer.seed,seamless,'f2f1'); break;
+            default:           v=nFbm(sn,sx,sy,layer.scale,layer.octaves,layer.persistence,layer.lacunarity,seamless);
+          }
+          
+          // Normalize to [0, 1]
+          v = (v + 1) / 2;
+          if (layer.invert) v = 1 - v;
+
+          const idx = y * W + x;
+          if (lIdx === 0 && !baseImage) {
+            combined[idx] = v * layer.intensity;
+          } else {
+            combined[idx] = blend(combined[idx], v, layer.blendMode || 'normal', layer.intensity);
+          }
+        }
+      }
+      self.postMessage({type:'progress', progress: (lIdx + 1) / layers.length * 0.7});
+    });
+  }
 
   // Normalize final combined result to [0,1]
   let mn=Infinity, mx=-Infinity;
@@ -312,9 +489,15 @@ self.onmessage = function(e) {
 
   // Apply bias + contrast + threshold
   const binary = new Uint8Array(totalPixels);
+  const shouldApplyPost = activeTab !== 'texture' || applyPostToTexture;
+  
   for (let i=0;i<totalPixels;i++) {
-    const v = Math.max(0, Math.min(1, combined[i]+bias));
-    binary[i] = applyContrast(v, threshold, contrast);
+    if (shouldApplyPost) {
+      const v = Math.max(0, Math.min(1, combined[i]+bias));
+      binary[i] = applyContrast(v, threshold, contrast);
+    } else {
+      binary[i] = Math.floor(combined[i] * 255);
+    }
   }
 
   self.postMessage({type:'progress', progress: 0.8});
