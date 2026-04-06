@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Settings, Download, Play, X, Info, Layers, Maximize2, RefreshCw, Check, AlertCircle, Upload, Image as ImageIcon } from 'lucide-react';
+import { Settings, Download, Play, X, Info, Layers, Maximize2, RefreshCw, Check, AlertCircle, Upload, Image as ImageIcon, Copy, LayoutGrid, Trash2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import NoiseWorker from './noise.worker?worker';
 
@@ -62,25 +62,49 @@ interface NoiseParams {
   noiseIntensity: number;
 }
 
+interface BatchSettings {
+  enabled: boolean;
+  count: number;
+  randomizeSeed: boolean;
+  randomizeThreshold: boolean;
+  randomizeContrast: boolean;
+  randomizeBias: boolean;
+  randomizeSpread: boolean;
+}
+
+const DEFAULT_PARAMS: NoiseParams = {
+  noiseType: 'fbm',
+  width: 512,
+  height: 512,
+  scale: 3.0,
+  octaves: 8,
+  persistence: 0.55,
+  lacunarity: 2.0,
+  threshold: 0.50,
+  contrast: 3.0,
+  bias: 0.0,
+  spread: 0,
+  seed: 42,
+  invert: false,
+  seamless: true,
+  imageIntensity: 1.0,
+  noiseIntensity: 1.0,
+};
+
 export default function App() {
-  const [params, setParams] = useState<NoiseParams>({
-    noiseType: 'fbm',
-    width: 512,
-    height: 512,
-    scale: 3.0,
-    octaves: 8,
-    persistence: 0.55,
-    lacunarity: 2.0,
-    threshold: 0.50,
-    contrast: 3.0,
-    bias: 0.0,
-    spread: 0,
-    seed: 42,
-    invert: false,
-    seamless: true,
-    imageIntensity: 1.0,
-    noiseIntensity: 1.0,
+  const [params, setParams] = useState<NoiseParams>(DEFAULT_PARAMS);
+
+  const [batchSettings, setBatchSettings] = useState<BatchSettings>({
+    enabled: false,
+    count: 4,
+    randomizeSeed: true,
+    randomizeThreshold: false,
+    randomizeContrast: false,
+    randomizeBias: false,
+    randomizeSpread: false,
   });
+
+  const [batchResults, setBatchResults] = useState<any[]>([]);
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -97,6 +121,14 @@ export default function App() {
 
   const updateParam = (key: keyof NoiseParams, value: any) => {
     setParams(prev => ({ ...prev, [key]: value }));
+  };
+
+  const resetParam = (key: keyof NoiseParams) => {
+    setParams(prev => ({ ...prev, [key]: DEFAULT_PARAMS[key] }));
+  };
+
+  const updateBatchSetting = (key: keyof BatchSettings, value: any) => {
+    setBatchSettings(prev => ({ ...prev, [key]: value }));
   };
 
   const applyPreset = (presetKey: keyof typeof PRESETS) => {
@@ -129,21 +161,74 @@ export default function App() {
     setBaseImage(grayscale);
   };
 
-  const generate = useCallback((forceResolution?: { w: number, h: number }) => {
+  const generate = useCallback(async (forceResolution?: { w: number, h: number }) => {
     const w = forceResolution?.w ?? params.width;
     const h = forceResolution?.h ?? params.height;
 
-    // Safety check for extreme resolutions
     if (w * h > 16384 * 16384) {
       setStatus('RESOLUTION TOO HIGH');
       setStatText('Resolutions above 16k may crash the browser. Proceed with caution.');
-      if (!window.confirm('Resolutions this high can use vast amounts of memory and may crash your browser tab. Continue?')) {
-        return;
-      }
+      return;
     }
 
     setIsGenerating(true);
     setProgress(0);
+    
+    if (batchSettings.enabled && !forceResolution) {
+      setStatus(`BATCH GENERATING ${batchSettings.count} IMAGES`);
+      setStatText(`Generating ${batchSettings.count} variations...`);
+      setBatchResults([]);
+      
+      const results: any[] = [];
+      for (let i = 0; i < batchSettings.count; i++) {
+        const variationParams = { ...params };
+        if (batchSettings.randomizeSeed) variationParams.seed = Math.floor(Math.random() * 1000000);
+        if (batchSettings.randomizeThreshold) variationParams.threshold = Math.random();
+        if (batchSettings.randomizeContrast) variationParams.contrast = Math.random() * 6; // Adjusted for new range
+        if (batchSettings.randomizeBias) variationParams.bias = -0.45 + Math.random() * 0.9;
+        if (batchSettings.randomizeSpread) variationParams.spread = Math.floor(Math.random() * 48);
+
+        try {
+          const result = await new Promise<any>((resolve, reject) => {
+            const worker = new NoiseWorker();
+            worker.onmessage = (e) => {
+              if (e.data.type === 'done') {
+                const { rgba, width, height } = e.data;
+                // Convert to dataURL for preview
+                const canvas = document.createElement('canvas');
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext('2d');
+                if (ctx) {
+                  const id = new ImageData(new Uint8ClampedArray(rgba), width, height);
+                  ctx.putImageData(id, 0, 0);
+                  const dataUrl = canvas.toDataURL();
+                  worker.terminate();
+                  resolve({ ...e.data, dataUrl, params: variationParams });
+                }
+              }
+            };
+            worker.onerror = (err) => {
+              worker.terminate();
+              reject(err);
+            };
+            worker.postMessage({ ...variationParams, width: w, height: h, baseImage });
+          });
+          results.push(result);
+          setBatchResults([...results]);
+          setProgress((i + 1) / batchSettings.count);
+        } catch (err) {
+          console.error('Batch worker error:', err);
+        }
+      }
+      
+      setIsGenerating(false);
+      setStatus(`BATCH DONE // ${batchSettings.count} IMAGES`);
+      setStatText(`Generated ${batchSettings.count} variations`);
+      return;
+    }
+
+    // Single generation
     setStatus(`GENERATING ${w}×${h} // ${params.noiseType.toUpperCase()}`);
     setStatText(`${w}×${h} — this may take a moment...`);
 
@@ -210,7 +295,7 @@ export default function App() {
       height: h, 
       baseImage: baseImage 
     });
-  }, [params, isGenerating, baseImage]);
+  }, [params, isGenerating, baseImage, batchSettings]);
 
   // Live updates with debounce
   useEffect(() => {
@@ -245,9 +330,10 @@ export default function App() {
     baseImage
   ]);
 
-  const downloadPNG = async () => {
-    if (!currentResult) return;
-    const { rgba, width, height } = currentResult;
+  const downloadPNG = async (result?: any) => {
+    const target = result || currentResult;
+    if (!target) return;
+    const { rgba, width, height, params: resParams } = target;
     setStatText('Encoding PNG...');
 
     const offC = document.createElement('canvas');
@@ -264,11 +350,21 @@ export default function App() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `noiseforge_${params.noiseType}_${width}x${height}_s${params.seed}.png`;
+      const seed = resParams?.seed ?? params.seed;
+      const type = resParams?.noiseType ?? params.noiseType;
+      a.download = `noiseforge_${type}_${width}x${height}_s${seed}.png`;
       a.click();
       URL.revokeObjectURL(url);
       setStatText(`Saved ${width}×${height} PNG`);
     }, 'image/png');
+  };
+
+  const downloadAllBatch = async () => {
+    for (const res of batchResults) {
+      await downloadPNG(res);
+      // Small delay to prevent browser from blocking multiple downloads
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
   };
 
   return (
@@ -393,6 +489,7 @@ export default function App() {
                     type="range" min="0" max="2" step="0.01"
                     value={params.imageIntensity}
                     onChange={(e) => updateParam('imageIntensity', parseFloat(e.target.value))}
+                    onDoubleClick={() => resetParam('imageIntensity')}
                     className="w-full h-0.5 bg-[#262626] appearance-none outline-none cursor-pointer accent-[#c8a030]"
                   />
                 </div>
@@ -405,6 +502,7 @@ export default function App() {
                     type="range" min="0" max="2" step="0.01"
                     value={params.noiseIntensity}
                     onChange={(e) => updateParam('noiseIntensity', parseFloat(e.target.value))}
+                    onDoubleClick={() => resetParam('noiseIntensity')}
                     className="w-full h-0.5 bg-[#262626] appearance-none outline-none cursor-pointer accent-[#c8a030]"
                   />
                 </div>
@@ -419,10 +517,10 @@ export default function App() {
             </h3>
             
             {[
-              { label: 'Scale', key: 'scale', min: 0.5, max: 24, step: 0.1, dec: 1 },
-              { label: 'Octaves', key: 'octaves', min: 1, max: 12, step: 1, dec: 0 },
-              { label: 'Persistence', key: 'persistence', min: 0.1, max: 0.95, step: 0.01, dec: 2 },
-              { label: 'Lacunarity', key: 'lacunarity', min: 1.0, max: 4.0, step: 0.05, dec: 2 },
+              { label: 'Scale', key: 'scale', min: 0, max: 6, step: 0.1, dec: 1 },
+              { label: 'Octaves', key: 'octaves', min: 4, max: 12, step: 1, dec: 0 },
+              { label: 'Persistence', key: 'persistence', min: 0.15, max: 0.95, step: 0.01, dec: 2 },
+              { label: 'Lacunarity', key: 'lacunarity', min: 0, max: 4.0, step: 0.05, dec: 2 },
             ].map(ctrl => (
               <div key={ctrl.key} className="mb-4 last:mb-0">
                 <div className="flex justify-between items-center mb-1">
@@ -436,6 +534,7 @@ export default function App() {
                   step={ctrl.step}
                   value={(params as any)[ctrl.key]}
                   onChange={(e) => updateParam(ctrl.key as any, parseFloat(e.target.value))}
+                  onDoubleClick={() => resetParam(ctrl.key as any)}
                   className="w-full h-0.5 bg-[#262626] appearance-none outline-none cursor-pointer accent-[#c8a030]"
                 />
               </div>
@@ -457,7 +556,7 @@ export default function App() {
             <h3 className="font-mono text-[9px] tracking-[2px] uppercase text-[#7a5f18] mb-4">Island / Clustering</h3>
             {[
               { label: 'Threshold', key: 'threshold', min: 0.0, max: 1.0, step: 0.01, dec: 2 },
-              { label: 'Island Contrast', key: 'contrast', min: 1, max: 30, step: 0.5, dec: 1 },
+              { label: 'Island Contrast', key: 'contrast', min: 0, max: 6, step: 0.1, dec: 1 },
               { label: 'Bias (B↔W)', key: 'bias', min: -0.45, max: 0.45, step: 0.01, dec: 2 },
               { label: 'Island Spread', key: 'spread', min: 0, max: 48, step: 1, dec: 0 },
             ].map(ctrl => (
@@ -473,6 +572,7 @@ export default function App() {
                   step={ctrl.step}
                   value={(params as any)[ctrl.key]}
                   onChange={(e) => updateParam(ctrl.key as any, parseFloat(e.target.value))}
+                  onDoubleClick={() => resetParam(ctrl.key as any)}
                   className="w-full h-0.5 bg-[#262626] appearance-none outline-none cursor-pointer accent-[#c8a030]"
                 />
               </div>
@@ -498,6 +598,70 @@ export default function App() {
             ))}
           </section>
 
+          {/* Batch Generation */}
+          <section className="p-4 border-b border-[#1a1a1a]">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-mono text-[9px] tracking-[2px] uppercase text-[#7a5f18] flex items-center gap-2">
+                <LayoutGrid size={10} /> Batch Mode
+              </h3>
+              <button 
+                onClick={() => updateBatchSetting('enabled', !batchSettings.enabled)}
+                className={`relative w-8 h-4 transition-colors duration-200 ${ batchSettings.enabled ? 'bg-[#7a5f18]' : 'bg-[#262626]' }`}
+              >
+                <div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-[#606060] transition-transform duration-200 ${ batchSettings.enabled ? 'translate-x-4 bg-[#c8a030]' : '' }`} />
+              </button>
+            </div>
+
+            {batchSettings.enabled && (
+              <motion.div 
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 'auto', opacity: 1 }}
+                className="overflow-hidden space-y-3"
+              >
+                <div>
+                  <span className="text-[10px] uppercase text-[#606060] block mb-1">Batch Size</span>
+                  <div className="flex gap-1">
+                    {[4, 8, 12, 16].map(n => (
+                      <button 
+                        key={n}
+                        onClick={() => updateBatchSetting('count', n)}
+                        className={`flex-1 py-1 font-mono text-[10px] border ${batchSettings.count === n ? 'border-[#c8a030] text-[#c8a030]' : 'border-[#262626] text-[#606060]'}`}
+                      >
+                        {n}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <span className="text-[10px] uppercase text-[#606060] block">Randomize Fields</span>
+                  {[
+                    { label: 'Seed', key: 'randomizeSeed' },
+                    { label: 'Threshold', key: 'randomizeThreshold' },
+                    { label: 'Contrast', key: 'randomizeContrast' },
+                    { label: 'Bias', key: 'randomizeBias' },
+                    { label: 'Spread', key: 'randomizeSpread' },
+                  ].map(field => (
+                    <label key={field.key} className="flex items-center gap-2 cursor-pointer group">
+                      <input 
+                        type="checkbox" 
+                        checked={(batchSettings as any)[field.key]}
+                        onChange={(e) => updateBatchSetting(field.key as any, e.target.checked)}
+                        className="hidden"
+                      />
+                      <div className={`w-3 h-3 border flex items-center justify-center transition-colors ${ (batchSettings as any)[field.key] ? 'border-[#c8a030] bg-[#c8a030]/10' : 'border-[#262626]' }`}>
+                        { (batchSettings as any)[field.key] && <Check size={8} className="text-[#c8a030]" /> }
+                      </div>
+                      <span className={`text-[10px] uppercase tracking-wider transition-colors ${ (batchSettings as any)[field.key] ? 'text-[#c8a030]' : 'text-[#606060] group-hover:text-[#b8b8b8]' }`}>
+                        {field.label}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </motion.div>
+            )}
+          </section>
+
           {/* Action Buttons */}
           <section className="p-4 mt-auto flex flex-col gap-2">
             <button 
@@ -506,15 +670,25 @@ export default function App() {
                 isGenerating ? 'bg-[#4a2020] text-[#f0a0a0]' : 'bg-[#c8a030] text-black hover:bg-[#f0f0f0]'
               }`}
             >
-              {isGenerating ? <><X size={14} /> Cancel</> : <><RefreshCw size={14} /> Full Render</>}
+              {isGenerating ? <><X size={14} /> Cancel</> : <><Play size={14} /> {batchSettings.enabled ? 'Generate Batch' : 'Full Render'}</>}
             </button>
-            <button 
-              onClick={downloadPNG}
-              disabled={!currentResult || isGenerating}
-              className="w-full py-2.5 font-bold text-xs tracking-[2px] uppercase border border-[#262626] text-[#b8b8b8] hover:border-[#c8a030] hover:text-[#c8a030] transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-            >
-              <Download size={14} /> Download PNG
-            </button>
+            {batchSettings.enabled && batchResults.length > 0 ? (
+              <button 
+                onClick={downloadAllBatch}
+                disabled={isGenerating}
+                className="w-full py-2.5 font-bold text-xs tracking-[2px] uppercase border border-[#262626] text-[#b8b8b8] hover:border-[#c8a030] hover:text-[#c8a030] transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              >
+                <Download size={14} /> Download All ({batchResults.length})
+              </button>
+            ) : (
+              <button 
+                onClick={() => downloadPNG()}
+                disabled={!currentResult || isGenerating}
+                className="w-full py-2.5 font-bold text-xs tracking-[2px] uppercase border border-[#262626] text-[#b8b8b8] hover:border-[#c8a030] hover:text-[#c8a030] transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              >
+                <Download size={14} /> Download PNG
+              </button>
+            )}
             <div className="font-mono text-[10px] text-[#606060] text-center mt-1">
               {statText}
             </div>
@@ -522,19 +696,58 @@ export default function App() {
         </aside>
 
         {/* Preview Area */}
-        <section className="flex-1 flex flex-col items-center justify-center relative overflow-hidden">
+        <section className="flex-1 flex flex-col items-center justify-center relative overflow-hidden p-8">
           {/* Grid Background */}
           <div className="absolute inset-0 pointer-events-none opacity-40 bg-[linear-gradient(#1a1a1a_1px,transparent_1px),linear-gradient(90deg,#1a1a1a_1px,transparent_1px)] bg-[size:40px_40px]" />
           
-          <div className="relative max-w-[calc(100%-60px)] max-h-[calc(100%-100px)] group">
-            <canvas 
-              ref={canvasRef}
-              className="block max-w-full max-h-full border border-[#262626] shadow-[0_0_40px_rgba(0,0,0,0.8)] [image-rendering:pixelated]"
-            />
-            <div className="absolute -bottom-6 right-0 font-mono text-[10px] text-[#606060]">
-              {previewInfo}
+          {batchSettings.enabled && batchResults.length > 0 ? (
+            <div className="w-full h-full overflow-y-auto scrollbar-thin scrollbar-thumb-[#262626] scrollbar-track-transparent pr-2">
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                {batchResults.map((res, idx) => (
+                  <div key={idx} className="relative group bg-[#0e0e0e] border border-[#262626] p-2 flex flex-col gap-2">
+                    <div className="relative aspect-square overflow-hidden bg-black">
+                      <img 
+                        src={res.dataUrl}
+                        alt={`Variation ${idx}`}
+                        className="w-full h-full object-contain [image-rendering:pixelated]"
+                      />
+                      <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-2">
+                        <button 
+                          onClick={() => downloadPNG(res)}
+                          className="px-3 py-1.5 bg-[#c8a030] text-black font-bold text-[10px] uppercase tracking-wider flex items-center gap-2 hover:bg-white transition-colors"
+                        >
+                          <Download size={12} /> Save
+                        </button>
+                        <button 
+                          onClick={() => {
+                            setParams({ ...params, ...res.params });
+                            setBatchSettings({ ...batchSettings, enabled: false });
+                          }}
+                          className="px-3 py-1.5 bg-[#1c1c1c] text-[#c8a030] border border-[#c8a030] font-bold text-[10px] uppercase tracking-wider flex items-center gap-2 hover:bg-[#c8a030] hover:text-black transition-colors"
+                        >
+                          <Copy size={12} /> Apply
+                        </button>
+                      </div>
+                    </div>
+                    <div className="flex justify-between items-center font-mono text-[9px] text-[#606060]">
+                      <span>S: {res.params.seed}</span>
+                      <span>T: {res.params.threshold.toFixed(2)}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className="relative max-w-[calc(100%-60px)] max-h-[calc(100%-100px)] group">
+              <canvas 
+                ref={canvasRef}
+                className="block max-w-full max-h-full border border-[#262626] shadow-[0_0_40px_rgba(0,0,0,0.8)] [image-rendering:pixelated]"
+              />
+              <div className="absolute -bottom-6 right-0 font-mono text-[10px] text-[#606060]">
+                {previewInfo}
+              </div>
+            </div>
+          )}
 
           {/* Overlays */}
           <AnimatePresence>
