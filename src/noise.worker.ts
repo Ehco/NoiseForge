@@ -209,8 +209,6 @@ function nWorley(sx: number, sy: number, sc: number, seed: number, seamless: boo
 function applyContrast(v: number, thr: number, k: number) {
   if (k <= 0) return v > thr ? 255 : 0;
   // Map v to be centered at thr, then apply sigmoid
-  // We use a steeper sigmoid: 1 / (1 + exp(-k * (v - thr)))
-  // To make it "noticeable", k needs to be higher, e.g., 10-100
   const res = 1 / (1 + Math.exp(-k * (v - thr)));
   return Math.floor(res * 255);
 }
@@ -223,7 +221,8 @@ function buildPrefixSum(bin: Uint8Array, W: number, H: number, pad: number) {
     const sy = ((y-pad)%H+H)%H;
     for (let x=0; x<PW; x++) {
       const sx = ((x-pad)%W+W)%W;
-      const v = bin[sy*W+sx]===255?1:0;
+      // FIX: Use threshold to define "white" for dilation
+      const v = bin[sy*W+sx] > 127 ? 1 : 0;
       ps[(y+1)*(PW+1)+(x+1)] = v
         + ps[y*(PW+1)+(x+1)]
         + ps[(y+1)*(PW+1)+x]

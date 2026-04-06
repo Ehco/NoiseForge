@@ -33,18 +33,18 @@ const RESOLUTIONS = [
 ];
 
 const PRESETS = {
-  musgrave:  { noiseType: 'fbm', scale: 3, octaves: 8, persistence: 0.55, lacunarity: 2.0, threshold: 0.50, contrast: 3.0, bias: 0.0, spread: 0 },
-  rocky:     { noiseType: 'ridged', scale: 4, octaves: 8, persistence: 0.60, lacunarity: 2.2, threshold: 0.45, contrast: 5.0, bias: 0.05, spread: 0 },
-  islands:   { noiseType: 'fbm', scale: 2.5, octaves: 6, persistence: 0.65, lacunarity: 1.8, threshold: 0.50, contrast: 12.0, bias: 0.1, spread: 8 },
+  musgrave:  { noiseType: 'fbm', scale: 3, octaves: 24, persistence: 0.55, lacunarity: 2.0, threshold: 0.50, contrast: 3.0, bias: 0.0, spread: 0 },
+  rocky:     { noiseType: 'ridged', scale: 4, octaves: 24, persistence: 0.60, lacunarity: 2.2, threshold: 0.45, contrast: 5.0, bias: 0.05, spread: 0 },
+  islands:   { noiseType: 'fbm', scale: 2.5, octaves: 16, persistence: 0.65, lacunarity: 1.8, threshold: 0.50, contrast: 12.0, bias: 0.1, spread: 8 },
   cells:     { noiseType: 'worley_f1', scale: 6, octaves: 1, persistence: 0.5, lacunarity: 2.0, threshold: 0.40, contrast: 6.0, bias: 0.0, spread: 3 },
-  swirls:    { noiseType: 'domain_warp', scale: 3, octaves: 8, persistence: 0.55, lacunarity: 2.0, threshold: 0.50, contrast: 4.0, bias: 0.0, spread: 0 },
+  swirls:    { noiseType: 'domain_warp', scale: 3, octaves: 24, persistence: 0.55, lacunarity: 2.0, threshold: 0.50, contrast: 4.0, bias: 0.0, spread: 0 },
   crater:    { noiseType: 'worley_f2f1', scale: 5, octaves: 1, persistence: 0.5, lacunarity: 2.0, threshold: 0.35, contrast: 8.0, bias: 0.05, spread: 5 },
-  clouds:    { noiseType: 'billow', scale: 2.5, octaves: 7, persistence: 0.60, lacunarity: 2.0, threshold: 0.52, contrast: 2.5, bias: 0.0, spread: 0 },
-  fine:      { noiseType: 'fbm', scale: 7, octaves: 10, persistence: 0.45, lacunarity: 2.5, threshold: 0.50, contrast: 2.0, bias: 0.0, spread: 0 },
-  nebula:    { noiseType: 'swiss', scale: 1.5, octaves: 9, persistence: 0.7, lacunarity: 2.1, threshold: 0.48, contrast: 15, bias: 0.0, spread: 0 },
-  topography:{ noiseType: 'ridged', scale: 0.8, octaves: 12, persistence: 0.5, lacunarity: 2.0, threshold: 0.5, contrast: 80, bias: 0.0, spread: 0 },
-  plasma:    { noiseType: 'jordan', scale: 2.0, octaves: 8, persistence: 0.6, lacunarity: 2.0, threshold: 0.5, contrast: 10, bias: 0.0, spread: 0 },
-  marble:    { noiseType: 'domain_warp', scale: 0.5, octaves: 8, persistence: 0.5, lacunarity: 2.0, threshold: 0.5, contrast: 25, bias: 0.0, spread: 0 },
+  clouds:    { noiseType: 'billow', scale: 2.5, octaves: 24, persistence: 0.60, lacunarity: 2.0, threshold: 0.52, contrast: 2.5, bias: 0.0, spread: 0 },
+  fine:      { noiseType: 'fbm', scale: 7, octaves: 24, persistence: 0.45, lacunarity: 2.5, threshold: 0.50, contrast: 2.0, bias: 0.0, spread: 0 },
+  nebula:    { noiseType: 'swiss', scale: 1.5, octaves: 24, persistence: 0.7, lacunarity: 2.1, threshold: 0.48, contrast: 15, bias: 0.0, spread: 0 },
+  topography:{ noiseType: 'ridged', scale: 0.8, octaves: 24, persistence: 0.5, lacunarity: 2.0, threshold: 0.5, contrast: 80, bias: 0.0, spread: 0 },
+  plasma:    { noiseType: 'jordan', scale: 2.0, octaves: 24, persistence: 0.6, lacunarity: 2.0, threshold: 0.5, contrast: 10, bias: 0.0, spread: 0 },
+  marble:    { noiseType: 'domain_warp', scale: 0.5, octaves: 24, persistence: 0.5, lacunarity: 2.0, threshold: 0.5, contrast: 25, bias: 0.0, spread: 0 },
   static:    { noiseType: 'perlin', scale: 50, octaves: 1, persistence: 0.5, lacunarity: 2.0, threshold: 0.5, contrast: 1, bias: 0.0, spread: 0 },
 };
 
@@ -89,7 +89,7 @@ const DEFAULT_LAYER: NoiseLayer = {
   id: '1',
   noiseType: 'fbm',
   scale: 3.0,
-  octaves: 8,
+  octaves: 24,
   persistence: 0.55,
   lacunarity: 2.0,
   seed: 42,
@@ -110,6 +110,121 @@ const DEFAULT_PARAMS: NoiseParams = {
   seamless: true,
   invert: false,
   imageIntensity: 1.0,
+};
+
+// --- Components ---
+const Slider = ({ label, value, min, max, step, onChange, onReset, defaultValue, tooltip, dec = 2 }: any) => {
+  const [isEditing, setIsEditing] = useState(false);
+  const [tempValue, setTempValue] = useState(value.toString());
+
+  useEffect(() => {
+    if (!isEditing) setTempValue(value.toString());
+  }, [value, isEditing]);
+
+  const handleBlur = () => {
+    setIsEditing(false);
+    const val = parseFloat(tempValue);
+    if (!isNaN(val)) onChange(val);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') handleBlur();
+    if (e.key === 'Escape') {
+      setIsEditing(false);
+      setTempValue(value.toString());
+    }
+  };
+
+  return (
+    <div className="space-y-1.5 group/slider">
+      <div className="flex justify-between items-center">
+        <div className="flex items-center gap-1.5">
+          <span className="text-[10px] uppercase tracking-wider text-[#606060] group-hover/slider:text-[#b8b8b8] transition-colors">{label}</span>
+          {tooltip && (
+            <div className="relative group/tooltip">
+              <Info size={10} className="text-[#333] group-hover/tooltip:text-[#606060] transition-colors cursor-help" />
+              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 p-2 bg-[#1a1a1a] border border-[#333] text-[9px] text-[#b8b8b8] rounded shadow-xl opacity-0 invisible group-hover/tooltip:opacity-100 group-hover/tooltip:visible transition-all z-50 pointer-events-none leading-relaxed">
+                {tooltip}
+              </div>
+            </div>
+          )}
+        </div>
+        {isEditing ? (
+          <input
+            type="text"
+            value={tempValue}
+            onChange={(e) => setTempValue(e.target.value)}
+            onBlur={handleBlur}
+            onKeyDown={handleKeyDown}
+            autoFocus
+            className="text-[10px] font-mono text-white bg-[#1a1a1a] border border-[#c8a030] w-16 text-right px-1 outline-none"
+          />
+        ) : (
+          <span 
+            className="text-[10px] font-mono text-[#c8a030] cursor-pointer hover:text-white transition-colors"
+            onDoubleClick={onReset}
+            onClick={() => setIsEditing(true)}
+            title="Click to edit, Double-click to reset"
+          >
+            {value.toFixed(dec)}
+          </span>
+        )}
+      </div>
+      <div className="relative h-4 flex items-center">
+        {defaultValue !== undefined && (
+          <div 
+            className="absolute top-1/2 -translate-y-1/2 w-0.5 h-2 bg-[#333] pointer-events-none z-0"
+            style={{ left: `${Math.max(0, Math.min(100, ((defaultValue - min) / (max - min)) * 100))}%` }}
+          />
+        )}
+        <input 
+          type="range" min={min} max={max} step={step} value={value}
+          onChange={(e) => onChange(parseFloat(e.target.value))}
+          className="w-full h-1 bg-[#1a1a1a] rounded-full appearance-none cursor-pointer accent-[#c8a030] hover:accent-[#f0f0f0] transition-all relative z-10"
+        />
+      </div>
+    </div>
+  );
+};
+
+const CollapsibleSection = ({ isOpen, onToggle, title, icon: Icon, children }: any) => {
+  return (
+    <div className="border-b border-[#1a1a1a]">
+      <button 
+        type="button"
+        onClick={onToggle}
+        className="w-full p-4 flex items-center justify-between hover:bg-[#111] transition-colors group"
+      >
+        <div className="flex items-center gap-2">
+          <Icon size={12} className={isOpen ? 'text-[#c8a030]' : 'text-[#606060]'} />
+          <h3 className={`font-mono text-[9px] tracking-[2px] uppercase transition-colors ${isOpen ? 'text-[#c8a030]' : 'text-[#606060] group-hover:text-[#b8b8b8]'}`}>
+            {title}
+          </h3>
+        </div>
+        <motion.div
+          animate={{ rotate: isOpen ? 0 : -90 }}
+          transition={{ duration: 0.2 }}
+        >
+          <Plus size={10} className={isOpen ? 'text-[#333]' : 'text-[#606060]'} />
+        </motion.div>
+      </button>
+      <AnimatePresence initial={false}>
+        {isOpen && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2, ease: 'easeInOut' }}
+            className="overflow-hidden"
+          >
+            <div className="p-4 pt-0">
+              {children}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
 };
 
 export default function App() {
@@ -203,7 +318,7 @@ export default function App() {
       ...l,
       noiseType: NOISE_TYPES[Math.floor(Math.random() * NOISE_TYPES.length)].id,
       scale: 0.5 + Math.random() * 10,
-      octaves: 1 + Math.floor(Math.random() * 11),
+      octaves: 1 + Math.floor(Math.random() * 31),
       persistence: 0.2 + Math.random() * 0.7,
       lacunarity: 1.5 + Math.random() * 2,
       seed: Math.floor(Math.random() * 1000000),
@@ -233,85 +348,6 @@ export default function App() {
   };
 
   const activeLayer = params.layers.find(l => l.id === activeLayerId) || params.layers[0];
-
-  const Slider = ({ label, value, min, max, step, onChange, onReset, defaultValue, tooltip, dec = 2 }: any) => (
-    <div className="space-y-1.5 group/slider">
-      <div className="flex justify-between items-center">
-        <div className="flex items-center gap-1.5">
-          <span className="text-[10px] uppercase tracking-wider text-[#606060] group-hover/slider:text-[#b8b8b8] transition-colors">{label}</span>
-          {tooltip && (
-            <div className="relative group/tooltip">
-              <Info size={10} className="text-[#333] group-hover/tooltip:text-[#606060] transition-colors cursor-help" />
-              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 p-2 bg-[#1a1a1a] border border-[#333] text-[9px] text-[#b8b8b8] rounded shadow-xl opacity-0 invisible group-hover/tooltip:opacity-100 group-hover/tooltip:visible transition-all z-50 pointer-events-none leading-relaxed">
-                {tooltip}
-              </div>
-            </div>
-          )}
-        </div>
-        <span 
-          className="text-[10px] font-mono text-[#c8a030] cursor-pointer hover:text-white transition-colors"
-          onDoubleClick={onReset}
-          title="Double-click to reset"
-        >
-          {value.toFixed(dec)}
-        </span>
-      </div>
-      <div className="relative h-4 flex items-center">
-        {/* Default marker */}
-        {defaultValue !== undefined && (
-          <div 
-            className="absolute top-1/2 -translate-y-1/2 w-0.5 h-2 bg-[#333] pointer-events-none z-0"
-            style={{ left: `${((defaultValue - min) / (max - min)) * 100}%` }}
-          />
-        )}
-        <input 
-          type="range" min={min} max={max} step={step} value={value}
-          onChange={(e) => onChange(parseFloat(e.target.value))}
-          className="w-full h-1 bg-[#1a1a1a] rounded-full appearance-none cursor-pointer accent-[#c8a030] hover:accent-[#f0f0f0] transition-all relative z-10"
-        />
-      </div>
-    </div>
-  );
-
-  const CollapsibleSection = ({ id, title, icon: Icon, children }: any) => {
-    const isOpen = !collapsedSections[id];
-    return (
-      <div className="border-b border-[#1a1a1a]">
-        <button 
-          onClick={() => toggleSection(id)}
-          className="w-full p-4 flex items-center justify-between hover:bg-[#111] transition-colors group"
-        >
-          <div className="flex items-center gap-2">
-            <Icon size={12} className={isOpen ? 'text-[#c8a030]' : 'text-[#606060]'} />
-            <h3 className={`font-mono text-[9px] tracking-[2px] uppercase transition-colors ${isOpen ? 'text-[#c8a030]' : 'text-[#606060] group-hover:text-[#b8b8b8]'}`}>
-              {title}
-            </h3>
-          </div>
-          <motion.div
-            animate={{ rotate: isOpen ? 0 : -90 }}
-            transition={{ duration: 0.2 }}
-          >
-            <Plus size={10} className={isOpen ? 'text-[#333]' : 'text-[#606060]'} />
-          </motion.div>
-        </button>
-        <AnimatePresence initial={false}>
-          {isOpen && (
-            <motion.div
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: 'auto', opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              transition={{ duration: 0.2, ease: 'easeInOut' }}
-              className="overflow-hidden"
-            >
-              <div className="p-4 pt-0">
-                {children}
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
-    );
-  };
 
   const processImage = async (file: File) => {
     const img = new Image();
@@ -824,11 +860,12 @@ export default function App() {
         {/* Sidebar (Right) */}
         <aside className="w-80 bg-[#0e0e0e] border-l border-[#262626] overflow-y-auto shrink-0 flex flex-col scrollbar-thin scrollbar-thumb-[#262626] scrollbar-track-transparent">
           
-          <CollapsibleSection id="presets" title="Presets" icon={Settings}>
+          <CollapsibleSection id="presets" title="Presets" icon={Settings} isOpen={!collapsedSections.presets} onToggle={() => toggleSection('presets')}>
             <div className="grid grid-cols-2 gap-2">
               {Object.entries(PRESETS).map(([name, preset]) => (
                 <button 
                   key={name}
+                  type="button"
                   onClick={() => applyPreset(name as any)}
                   className="px-3 py-2 bg-[#141414] border border-[#262626] text-[10px] font-mono text-[#b8b8b8] uppercase tracking-wider hover:border-[#c8a030] hover:text-[#c8a030] transition-all text-left flex items-center justify-between group"
                 >
@@ -839,7 +876,7 @@ export default function App() {
             </div>
           </CollapsibleSection>
 
-          <CollapsibleSection id="layers" title="Layers" icon={Layers}>
+          <CollapsibleSection id="layers" title="Layers" icon={Layers} isOpen={!collapsedSections.layers} onToggle={() => toggleSection('layers')}>
             <div className="flex justify-between items-center mb-3">
               <button 
                 onClick={addLayer}
@@ -878,7 +915,7 @@ export default function App() {
             </div>
           </CollapsibleSection>
 
-          <CollapsibleSection id="activeLayer" title={`Layer ${params.layers.findIndex(l => l.id === activeLayerId) + 1} Settings`} icon={Settings}>
+          <CollapsibleSection id="activeLayer" title={`Layer ${params.layers.findIndex(l => l.id === activeLayerId) + 1} Settings`} icon={Settings} isOpen={!collapsedSections.activeLayer} onToggle={() => toggleSection('activeLayer')}>
             <div className="space-y-4">
               <div className="flex justify-between items-center">
                 <span className="text-[9px] uppercase text-[#606060]">Noise Type</span>
@@ -969,7 +1006,7 @@ export default function App() {
             </div>
           </CollapsibleSection>
 
-          <CollapsibleSection id="resolution" title="Resolution" icon={Maximize2}>
+          <CollapsibleSection id="resolution" title="Resolution" icon={Maximize2} isOpen={!collapsedSections.resolution} onToggle={() => toggleSection('resolution')}>
             <div className="grid grid-cols-2 gap-2">
               {RESOLUTIONS.map(res => (
                 <button 
@@ -987,7 +1024,7 @@ export default function App() {
             </div>
           </CollapsibleSection>
 
-          <CollapsibleSection id="heightmap" title="Image Heightmap" icon={ImageIcon}>
+          <CollapsibleSection id="heightmap" title="Image Heightmap" icon={ImageIcon} isOpen={!collapsedSections.image} onToggle={() => toggleSection('image')}>
             <div className="space-y-4">
               <div 
                 className="border-2 border-dashed border-[#262626] hover:border-[#c8a030] transition-colors p-4 flex flex-col items-center justify-center gap-2 cursor-pointer relative group"
@@ -1029,9 +1066,10 @@ export default function App() {
             </div>
           </CollapsibleSection>
 
-          <CollapsibleSection id="postProcess" title="Global Post-Process" icon={Settings}>
+          <CollapsibleSection id="postProcess" title="Global Post-Process" icon={Settings} isOpen={!collapsedSections.postProcess} onToggle={() => toggleSection('postProcess')}>
             <div className="flex justify-between items-center mb-4">
               <button 
+                type="button"
                 onClick={randomizeAll}
                 className="flex items-center gap-1 px-2 py-1 bg-[#c8a030]/10 border border-[#c8a030]/30 text-[#c8a030] font-mono text-[9px] uppercase hover:bg-[#c8a030]/20 transition-colors w-full justify-center"
               >
@@ -1101,7 +1139,7 @@ export default function App() {
             </div>
           </CollapsibleSection>
 
-          <CollapsibleSection id="batch" title="Batch Generation" icon={LayoutGrid}>
+          <CollapsibleSection id="batch" title="Batch Generation" icon={LayoutGrid} isOpen={!collapsedSections.batch} onToggle={() => toggleSection('batch')}>
             <div className="space-y-4">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] uppercase text-[#606060]">Enable Batch</span>
@@ -1154,6 +1192,7 @@ export default function App() {
           {/* Action Buttons */}
           <section className="p-4 mt-auto flex flex-col gap-2 sticky bottom-0 bg-[#0e0e0e] border-t border-[#262626] z-10">
             <button 
+              type="button"
               onClick={() => generate()}
               className={`w-full py-2.5 font-bold text-xs tracking-[2px] uppercase transition-all flex items-center justify-center gap-2 ${
                 isGenerating ? 'bg-[#4a2020] text-[#f0a0a0]' : 'bg-[#c8a030] text-black hover:bg-[#f0f0f0]'
@@ -1163,6 +1202,7 @@ export default function App() {
             </button>
             {batchSettings.enabled && batchResults.length > 0 ? (
               <button 
+                type="button"
                 onClick={downloadAllBatch}
                 disabled={isGenerating}
                 className="w-full py-2.5 font-bold text-xs tracking-[2px] uppercase border border-[#262626] text-[#b8b8b8] hover:border-[#c8a030] hover:text-[#c8a030] transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-2"
@@ -1171,6 +1211,7 @@ export default function App() {
               </button>
             ) : (
               <button 
+                type="button"
                 onClick={() => downloadPNG()}
                 disabled={!currentResult || isGenerating}
                 className="w-full py-2.5 font-bold text-xs tracking-[2px] uppercase border border-[#262626] text-[#b8b8b8] hover:border-[#c8a030] hover:text-[#c8a030] transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-2"
