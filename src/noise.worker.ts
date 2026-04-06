@@ -205,10 +205,14 @@ function nWorley(sx: number, sy: number, sc: number, seed: number, seamless: boo
   return Math.min(d1/mx,1)*2-1;
 }
 
-// Sigmoid contrast for island clustering
-function sigmoid(v: number, k: number) {
-  if (k<=1) return v;
-  return 1/(1+Math.exp(-k*(v-0.5)));
+// Sigmoid contrast centered at threshold
+function applyContrast(v: number, thr: number, k: number) {
+  if (k <= 0) return v > thr ? 255 : 0;
+  // Map v to be centered at thr, then apply sigmoid
+  // We use a steeper sigmoid: 1 / (1 + exp(-k * (v - thr)))
+  // To make it "noticeable", k needs to be higher, e.g., 10-100
+  const res = 1 / (1 + Math.exp(-k * (v - thr)));
+  return Math.floor(res * 255);
 }
 
 // 2D prefix sum for fast dilation
@@ -241,67 +245,77 @@ function dilateQuery(psd: any, x: number, y: number, r: number) {
 // ---- Main generation ----
 self.onmessage = function(e) {
   const p = e.data;
-  const {width: W, height: H, noiseType, scale, octaves, persistence, lacunarity,
-         threshold, contrast, bias, spread, seed, invert, seamless,
-         baseImage, imageIntensity = 1.0, noiseIntensity = 1.0} = p;
+  const {width: W, height: H, layers, threshold, contrast, bias, spread, seamless,
+         baseImage, imageIntensity = 1.0, invert} = p;
 
-  const sn = new SimplexNoise4D(seed);
   const totalPixels = W*H;
-  const raw = new Float32Array(totalPixels);
+  const combined = new Float32Array(totalPixels);
 
-  // Generate raw noise values
-  const CHUNK = 128;
-  for (let rowStart=0; rowStart<H; rowStart+=CHUNK) {
-    const rowEnd = Math.min(rowStart+CHUNK, H);
-    for (let y=rowStart; y<rowEnd; y++) {
-      const sy = y/H;
-      for (let x=0; x<W; x++) {
-        const sx = x/W;
-        let v;
-        switch(noiseType) {
-          case 'perlin':     v=nSingle(sn,sx,sy,scale,seamless); break;
-          case 'fbm':        v=nFbm(sn,sx,sy,scale,octaves,persistence,lacunarity,seamless); break;
-          case 'ridged':     v=nRidged(sn,sx,sy,scale,octaves,persistence,lacunarity,seamless); break;
-          case 'billow':     v=nBillow(sn,sx,sy,scale,octaves,persistence,lacunarity,seamless); break;
-          case 'domain_warp':v=nDomainWarp(sn,sx,sy,scale,octaves,persistence,lacunarity,seamless); break;
-          case 'swiss':      v=nSwiss(sn,sx,sy,scale,octaves,persistence,lacunarity,seamless); break;
-          case 'jordan':     v=nJordan(sn,sx,sy,scale,octaves,persistence,lacunarity,seamless); break;
-          case 'worley_f1':  v=nWorley(sx,sy,scale,seed,seamless,'f1'); break;
-          case 'worley_f2f1':v=nWorley(sx,sy,scale,seed,seamless,'f2f1'); break;
-          default:           v=nFbm(sn,sx,sy,scale,octaves,persistence,lacunarity,seamless);
-        }
-        raw[y*W+x] = v * noiseIntensity;
-      }
-    }
-    if ((rowStart/CHUNK) % 8 === 0) {
-      self.postMessage({type:'progress', progress: rowEnd/H * 0.7});
-    }
-  }
-
-  // Normalize to [0,1]
-  let mn=Infinity, mx=-Infinity;
-  for (let i=0;i<totalPixels;i++){if(raw[i]<mn)mn=raw[i];if(raw[i]>mx)mx=raw[i];}
-  const rng = mx-mn || 1;
-  for (let i=0;i<totalPixels;i++) raw[i]=(raw[i]-mn)/rng;
-
-  // Blend with base image if provided
+  // Initialize with base image if provided
   if (baseImage) {
     for (let i = 0; i < totalPixels; i++) {
-      // baseImage is expected to be a grayscale Uint8Array of size W*H
-      const imgVal = baseImage[i] / 255.0;
-      raw[i] = (raw[i] * noiseIntensity + imgVal * imageIntensity) / (noiseIntensity + imageIntensity || 1);
+      combined[i] = (baseImage[i] / 255.0) * imageIntensity;
     }
   }
+
+  const blend = (b: number, f: number, mode: string, opacity: number) => {
+    let res = f;
+    if (mode === 'add') res = b + f;
+    else if (mode === 'subtract') res = b - f;
+    else if (mode === 'multiply') res = b * f;
+    else if (mode === 'screen') res = 1 - (1 - b) * (1 - f);
+    else if (mode === 'overlay') res = b < 0.5 ? 2 * b * f : 1 - 2 * (1 - b) * (1 - f);
+    return b * (1 - opacity) + res * opacity;
+  };
+
+  layers.forEach((layer: any, lIdx: number) => {
+    const sn = new SimplexNoise4D(layer.seed);
+    for (let y = 0; y < H; y++) {
+      const sy = y / H;
+      for (let x = 0; x < W; x++) {
+        const sx = x / W;
+        let v;
+        switch(layer.noiseType) {
+          case 'perlin':     v=nSingle(sn,sx,sy,layer.scale,seamless); break;
+          case 'fbm':        v=nFbm(sn,sx,sy,layer.scale,layer.octaves,layer.persistence,layer.lacunarity,seamless); break;
+          case 'ridged':     v=nRidged(sn,sx,sy,layer.scale,layer.octaves,layer.persistence,layer.lacunarity,seamless); break;
+          case 'billow':     v=nBillow(sn,sx,sy,layer.scale,layer.octaves,layer.persistence,layer.lacunarity,seamless); break;
+          case 'domain_warp':v=nDomainWarp(sn,sx,sy,layer.scale,layer.octaves,layer.persistence,layer.lacunarity,seamless); break;
+          case 'swiss':      v=nSwiss(sn,sx,sy,layer.scale,layer.octaves,layer.persistence,layer.lacunarity,seamless); break;
+          case 'jordan':     v=nJordan(sn,sx,sy,layer.scale,layer.octaves,layer.persistence,layer.lacunarity,seamless); break;
+          case 'worley_f1':  v=nWorley(sx,sy,layer.scale,layer.seed,seamless,'f1'); break;
+          case 'worley_f2f1':v=nWorley(sx,sy,layer.scale,layer.seed,seamless,'f2f1'); break;
+          default:           v=nFbm(sn,sx,sy,layer.scale,layer.octaves,layer.persistence,layer.lacunarity,seamless);
+        }
+        
+        // Normalize to [0, 1]
+        v = (v + 1) / 2;
+        if (layer.invert) v = 1 - v;
+
+        const idx = y * W + x;
+        if (lIdx === 0 && !baseImage) {
+          combined[idx] = v * layer.intensity;
+        } else {
+          combined[idx] = blend(combined[idx], v, layer.blendMode || 'normal', layer.intensity);
+        }
+      }
+    }
+    self.postMessage({type:'progress', progress: (lIdx + 1) / layers.length * 0.7});
+  });
+
+  // Normalize final combined result to [0,1]
+  let mn=Infinity, mx=-Infinity;
+  for (let i=0;i<totalPixels;i++){if(combined[i]<mn)mn=combined[i];if(combined[i]>mx)mx=combined[i];}
+  const rng = mx-mn || 1;
+  for (let i=0;i<totalPixels;i++) combined[i]=(combined[i]-mn)/rng;
 
   self.postMessage({type:'progress', progress: 0.75});
 
-  // Apply bias + sigmoid contrast + threshold
+  // Apply bias + contrast + threshold
   const binary = new Uint8Array(totalPixels);
-  const thr = threshold;
   for (let i=0;i<totalPixels;i++) {
-    let v = Math.max(0, Math.min(1, raw[i]+bias));
-    v = sigmoid(v, contrast);
-    binary[i] = v>thr ? 255 : 0;
+    const v = Math.max(0, Math.min(1, combined[i]+bias));
+    binary[i] = applyContrast(v, threshold, contrast);
   }
 
   self.postMessage({type:'progress', progress: 0.8});

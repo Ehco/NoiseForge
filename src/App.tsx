@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Settings, Download, Play, X, Info, Layers, Maximize2, RefreshCw, Check, AlertCircle, Upload, Image as ImageIcon, Copy, LayoutGrid, Trash2 } from 'lucide-react';
+import { Settings, Download, Play, X, Info, Layers, Maximize2, RefreshCw, Check, AlertCircle, Upload, Image as ImageIcon, Copy, LayoutGrid, Trash2, Plus, Minus } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import NoiseWorker from './noise.worker?worker';
 
@@ -41,25 +41,38 @@ const PRESETS = {
   crater:    { noiseType: 'worley_f2f1', scale: 5, octaves: 1, persistence: 0.5, lacunarity: 2.0, threshold: 0.35, contrast: 8.0, bias: 0.05, spread: 5 },
   clouds:    { noiseType: 'billow', scale: 2.5, octaves: 7, persistence: 0.60, lacunarity: 2.0, threshold: 0.52, contrast: 2.5, bias: 0.0, spread: 0 },
   fine:      { noiseType: 'fbm', scale: 7, octaves: 10, persistence: 0.45, lacunarity: 2.5, threshold: 0.50, contrast: 2.0, bias: 0.0, spread: 0 },
+  nebula:    { noiseType: 'swiss', scale: 1.5, octaves: 9, persistence: 0.7, lacunarity: 2.1, threshold: 0.48, contrast: 15, bias: 0.0, spread: 0 },
+  topography:{ noiseType: 'ridged', scale: 0.8, octaves: 12, persistence: 0.5, lacunarity: 2.0, threshold: 0.5, contrast: 80, bias: 0.0, spread: 0 },
+  plasma:    { noiseType: 'jordan', scale: 2.0, octaves: 8, persistence: 0.6, lacunarity: 2.0, threshold: 0.5, contrast: 10, bias: 0.0, spread: 0 },
+  marble:    { noiseType: 'domain_warp', scale: 0.5, octaves: 8, persistence: 0.5, lacunarity: 2.0, threshold: 0.5, contrast: 25, bias: 0.0, spread: 0 },
+  static:    { noiseType: 'perlin', scale: 50, octaves: 1, persistence: 0.5, lacunarity: 2.0, threshold: 0.5, contrast: 1, bias: 0.0, spread: 0 },
 };
 
-interface NoiseParams {
+interface NoiseLayer {
+  id: string;
   noiseType: string;
-  width: number;
-  height: number;
   scale: number;
   octaves: number;
   persistence: number;
   lacunarity: number;
+  seed: number;
+  intensity: number;
+  blendMode: 'normal' | 'add' | 'subtract' | 'multiply' | 'screen' | 'overlay';
+  invert: boolean;
+  visible: boolean;
+}
+
+interface NoiseParams {
+  width: number;
+  height: number;
+  layers: NoiseLayer[];
   threshold: number;
   contrast: number;
   bias: number;
   spread: number;
-  seed: number;
-  invert: boolean;
   seamless: boolean;
+  invert: boolean;
   imageIntensity: number;
-  noiseIntensity: number;
 }
 
 interface BatchSettings {
@@ -72,27 +85,37 @@ interface BatchSettings {
   randomizeSpread: boolean;
 }
 
-const DEFAULT_PARAMS: NoiseParams = {
+const DEFAULT_LAYER: NoiseLayer = {
+  id: '1',
   noiseType: 'fbm',
-  width: 512,
-  height: 512,
   scale: 3.0,
   octaves: 8,
   persistence: 0.55,
   lacunarity: 2.0,
+  seed: 42,
+  intensity: 1.0,
+  blendMode: 'normal',
+  invert: false,
+  visible: true,
+};
+
+const DEFAULT_PARAMS: NoiseParams = {
+  width: 512,
+  height: 512,
+  layers: [DEFAULT_LAYER],
   threshold: 0.50,
   contrast: 3.0,
   bias: 0.0,
   spread: 0,
-  seed: 42,
-  invert: false,
   seamless: true,
+  invert: false,
   imageIntensity: 1.0,
-  noiseIntensity: 1.0,
 };
 
 export default function App() {
   const [params, setParams] = useState<NoiseParams>(DEFAULT_PARAMS);
+  const [activeLayerId, setActiveLayerId] = useState<string>('1');
+  const [defaultParams, setDefaultParams] = useState<NoiseParams>(DEFAULT_PARAMS);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
@@ -111,6 +134,7 @@ export default function App() {
 
   const [batchResults, setBatchResults] = useState<any[]>([]);
 
+  const [extremeSettings, setExtremeSettings] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState('READY — ADJUST PARAMS AND GENERATE');
@@ -119,6 +143,19 @@ export default function App() {
   const [previewInfo, setPreviewInfo] = useState('512 × 512 PREVIEW');
   const [baseImage, setBaseImage] = useState<Uint8Array | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({
+    presets: false,
+    layers: false,
+    activeLayer: false,
+    resolution: false,
+    heightmap: true,
+    postProcess: false,
+    batch: true,
+  });
+
+  const toggleSection = (id: string) => {
+    setCollapsedSections(prev => ({ ...prev, [id]: !prev[id] }));
+  };
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const workerRef = useRef<Worker | null>(null);
@@ -128,17 +165,152 @@ export default function App() {
     setParams(prev => ({ ...prev, [key]: value }));
   };
 
-  const resetParam = (key: keyof NoiseParams) => {
-    setParams(prev => ({ ...prev, [key]: DEFAULT_PARAMS[key] }));
-  };
-
   const updateBatchSetting = (key: keyof BatchSettings, value: any) => {
     setBatchSettings(prev => ({ ...prev, [key]: value }));
   };
 
+  const updateLayer = (id: string, key: keyof NoiseLayer, value: any) => {
+    setParams(prev => ({
+      ...prev,
+      layers: prev.layers.map(l => l.id === id ? { ...l, [key]: value } : l)
+    }));
+  };
+
+  const addLayer = () => {
+    const newId = Math.random().toString(36).substr(2, 9);
+    const newLayer: NoiseLayer = { ...DEFAULT_LAYER, id: newId, seed: Math.floor(Math.random() * 1000000) };
+    setParams(prev => ({ ...prev, layers: [...prev.layers, newLayer] }));
+    setActiveLayerId(newId);
+  };
+
+  const removeLayer = (id: string) => {
+    if (params.layers.length <= 1) return;
+    setParams(prev => ({ ...prev, layers: prev.layers.filter(l => l.id !== id) }));
+    if (activeLayerId === id) setActiveLayerId(params.layers[0].id);
+  };
+
+  const resetParam = (key: keyof NoiseParams) => {
+    setParams(prev => ({ ...prev, [key]: defaultParams[key] }));
+  };
+
+  const resetLayerParam = (id: string, key: keyof NoiseLayer) => {
+    const defaultLayer = defaultParams.layers.find(l => l.id === id) || DEFAULT_LAYER;
+    updateLayer(id, key, (defaultLayer as any)[key]);
+  };
+
+  const randomizeAll = () => {
+    const newLayers = params.layers.map(l => ({
+      ...l,
+      noiseType: NOISE_TYPES[Math.floor(Math.random() * NOISE_TYPES.length)].id,
+      scale: 0.5 + Math.random() * 10,
+      octaves: 1 + Math.floor(Math.random() * 11),
+      persistence: 0.2 + Math.random() * 0.7,
+      lacunarity: 1.5 + Math.random() * 2,
+      seed: Math.floor(Math.random() * 1000000),
+      intensity: 0.5 + Math.random() * 0.5,
+    }));
+    const newParams = {
+      ...params,
+      layers: newLayers,
+      threshold: Math.random(),
+      contrast: 1 + Math.random() * 20,
+      bias: -0.2 + Math.random() * 0.4,
+    };
+    setParams(newParams);
+    setDefaultParams(newParams); // Set as new default for reset
+  };
+
+  const randomizeSeed = (id: string) => {
+    updateLayer(id, 'seed', Math.floor(Math.random() * 1000000));
+  };
+
   const applyPreset = (presetKey: keyof typeof PRESETS) => {
     const preset = PRESETS[presetKey];
-    setParams(prev => ({ ...prev, ...preset }));
+    const newLayer = { ...DEFAULT_LAYER, id: activeLayerId, ...preset };
+    const newParams = { ...params, layers: params.layers.map(l => l.id === activeLayerId ? newLayer : l), threshold: preset.threshold, contrast: preset.contrast, bias: preset.bias, spread: preset.spread };
+    setParams(newParams);
+    setDefaultParams(newParams);
+  };
+
+  const activeLayer = params.layers.find(l => l.id === activeLayerId) || params.layers[0];
+
+  const Slider = ({ label, value, min, max, step, onChange, onReset, defaultValue, tooltip, dec = 2 }: any) => (
+    <div className="space-y-1.5 group/slider">
+      <div className="flex justify-between items-center">
+        <div className="flex items-center gap-1.5">
+          <span className="text-[10px] uppercase tracking-wider text-[#606060] group-hover/slider:text-[#b8b8b8] transition-colors">{label}</span>
+          {tooltip && (
+            <div className="relative group/tooltip">
+              <Info size={10} className="text-[#333] group-hover/tooltip:text-[#606060] transition-colors cursor-help" />
+              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 p-2 bg-[#1a1a1a] border border-[#333] text-[9px] text-[#b8b8b8] rounded shadow-xl opacity-0 invisible group-hover/tooltip:opacity-100 group-hover/tooltip:visible transition-all z-50 pointer-events-none leading-relaxed">
+                {tooltip}
+              </div>
+            </div>
+          )}
+        </div>
+        <span 
+          className="text-[10px] font-mono text-[#c8a030] cursor-pointer hover:text-white transition-colors"
+          onDoubleClick={onReset}
+          title="Double-click to reset"
+        >
+          {value.toFixed(dec)}
+        </span>
+      </div>
+      <div className="relative h-4 flex items-center">
+        {/* Default marker */}
+        {defaultValue !== undefined && (
+          <div 
+            className="absolute top-1/2 -translate-y-1/2 w-0.5 h-2 bg-[#333] pointer-events-none z-0"
+            style={{ left: `${((defaultValue - min) / (max - min)) * 100}%` }}
+          />
+        )}
+        <input 
+          type="range" min={min} max={max} step={step} value={value}
+          onChange={(e) => onChange(parseFloat(e.target.value))}
+          className="w-full h-1 bg-[#1a1a1a] rounded-full appearance-none cursor-pointer accent-[#c8a030] hover:accent-[#f0f0f0] transition-all relative z-10"
+        />
+      </div>
+    </div>
+  );
+
+  const CollapsibleSection = ({ id, title, icon: Icon, children }: any) => {
+    const isOpen = !collapsedSections[id];
+    return (
+      <div className="border-b border-[#1a1a1a]">
+        <button 
+          onClick={() => toggleSection(id)}
+          className="w-full p-4 flex items-center justify-between hover:bg-[#111] transition-colors group"
+        >
+          <div className="flex items-center gap-2">
+            <Icon size={12} className={isOpen ? 'text-[#c8a030]' : 'text-[#606060]'} />
+            <h3 className={`font-mono text-[9px] tracking-[2px] uppercase transition-colors ${isOpen ? 'text-[#c8a030]' : 'text-[#606060] group-hover:text-[#b8b8b8]'}`}>
+              {title}
+            </h3>
+          </div>
+          <motion.div
+            animate={{ rotate: isOpen ? 0 : -90 }}
+            transition={{ duration: 0.2 }}
+          >
+            <Plus size={10} className={isOpen ? 'text-[#333]' : 'text-[#606060]'} />
+          </motion.div>
+        </button>
+        <AnimatePresence initial={false}>
+          {isOpen && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.2, ease: 'easeInOut' }}
+              className="overflow-hidden"
+            >
+              <div className="p-4 pt-0">
+                {children}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    );
   };
 
   const processImage = async (file: File) => {
@@ -148,7 +320,6 @@ export default function App() {
     await new Promise(resolve => img.onload = resolve);
 
     const canvas = document.createElement('canvas');
-    // We'll process the image at the current resolution
     canvas.width = params.width;
     canvas.height = params.height;
     const ctx = canvas.getContext('2d');
@@ -159,7 +330,6 @@ export default function App() {
     const grayscale = new Uint8Array(params.width * params.height);
     
     for (let i = 0; i < imageData.data.length; i += 4) {
-      // Grayscale conversion: 0.299R + 0.587G + 0.114B
       grayscale[i / 4] = 0.299 * imageData.data[i] + 0.587 * imageData.data[i + 1] + 0.114 * imageData.data[i + 2];
     }
     
@@ -187,11 +357,15 @@ export default function App() {
       const results: any[] = [];
       for (let i = 0; i < batchSettings.count; i++) {
         const variationParams = { ...params };
-        if (batchSettings.randomizeSeed) variationParams.seed = Math.floor(Math.random() * 1000000);
+        variationParams.layers = params.layers.map(l => {
+          const newLayer = { ...l };
+          if (batchSettings.randomizeSeed) newLayer.seed = Math.floor(Math.random() * 1000000);
+          return newLayer;
+        });
         if (batchSettings.randomizeThreshold) variationParams.threshold = Math.random();
-        if (batchSettings.randomizeContrast) variationParams.contrast = Math.random() * 6; // Adjusted for new range
+        if (batchSettings.randomizeContrast) variationParams.contrast = Math.random() * (extremeSettings ? 200 : 20);
         if (batchSettings.randomizeBias) variationParams.bias = -0.45 + Math.random() * 0.9;
-        if (batchSettings.randomizeSpread) variationParams.spread = Math.floor(Math.random() * 48);
+        if (batchSettings.randomizeSpread) variationParams.spread = Math.floor(Math.random() * (extremeSettings ? 256 : 48));
 
         try {
           const result = await new Promise<any>((resolve, reject) => {
@@ -234,7 +408,7 @@ export default function App() {
     }
 
     // Single generation
-    setStatus(`GENERATING ${w}×${h} // ${params.noiseType.toUpperCase()}`);
+    setStatus(`GENERATING ${w}×${h} // ${params.layers[0].noiseType.toUpperCase()}`);
     setStatText(`${w}×${h} — this may take a moment...`);
 
     const t0 = performance.now();
@@ -300,7 +474,7 @@ export default function App() {
       height: h, 
       baseImage: baseImage 
     });
-  }, [params, isGenerating, baseImage, batchSettings]);
+  }, [params, baseImage, batchSettings]);
 
   const handleInvertToggle = () => {
     const newInvert = !params.invert;
@@ -377,19 +551,13 @@ export default function App() {
       if (debounceTimer.current) clearTimeout(debounceTimer.current);
     };
   }, [
-    params.noiseType, 
-    params.scale, 
-    params.octaves, 
-    params.persistence, 
-    params.lacunarity, 
+    params.layers, 
     params.threshold, 
     params.contrast, 
     params.bias, 
     params.spread, 
-    params.seed, 
     params.seamless,
     params.imageIntensity,
-    params.noiseIntensity,
     baseImage
   ]);
 
@@ -413,8 +581,8 @@ export default function App() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      const seed = resParams?.seed ?? params.seed;
-      const type = resParams?.noiseType ?? params.noiseType;
+      const seed = resParams?.layers?.[0]?.seed ?? params.layers[0].seed;
+      const type = resParams?.layers?.[0]?.noiseType ?? params.layers[0].noiseType;
       a.download = `noiseforge_${type}_${width}x${height}_s${seed}.png`;
       a.click();
       URL.revokeObjectURL(url);
@@ -463,12 +631,9 @@ export default function App() {
       
       if (e.key === '+' || e.key === '=') {
         setZoom(prev => Math.min(5, prev + 0.1));
-      }
-      if (e.key === '-' || e.key === '_') {
+      } else if (e.key === '-' || e.key === '_') {
         setZoom(prev => Math.max(0.1, prev - 0.1));
-      }
-      if (e.key === '0' && e.ctrlKey) {
-        e.preventDefault();
+      } else if (e.key === '0') {
         setZoom(1);
         setPan({ x: 0, y: 0 });
       }
@@ -519,329 +684,10 @@ export default function App() {
       </header>
 
       <main className="flex flex-1 overflow-hidden">
-        {/* Sidebar */}
-        <aside className="w-72 bg-[#0e0e0e] border-r border-[#262626] overflow-y-auto shrink-0 flex flex-col scrollbar-thin scrollbar-thumb-[#262626] scrollbar-track-transparent">
-          
-          {/* Noise Type & Presets */}
-          <section className="p-4 border-b border-[#1a1a1a]">
-            <h3 className="font-mono text-[9px] tracking-[2px] uppercase text-[#7a5f18] mb-3 flex items-center gap-2">
-              <Layers size={10} /> Noise Type
-            </h3>
-            <select 
-              value={params.noiseType}
-              onChange={(e) => updateParam('noiseType', e.target.value)}
-              className="w-full bg-[#141414] text-[#f0f0f0] border border-[#262626] p-2 font-mono text-xs outline-none focus:border-[#c8a030] cursor-pointer appearance-none bg-[url('data:image/svg+xml,%3Csvg_xmlns=%22http://www.w3.org/2000/svg%22_width=%2210%22_height=%226%22%3E%3Cpath_d=%22M0_0l5_6_5-6z%22_fill=%22%23606060%22/%3E%3C/svg%3E')] bg-no-repeat bg-[right_10px_center]"
-            >
-              {NOISE_TYPES.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-            </select>
-
-            <h3 className="font-mono text-[9px] tracking-[2px] uppercase text-[#7a5f18] mt-5 mb-3">Presets</h3>
-            <div className="flex flex-wrap gap-1.5">
-              {Object.keys(PRESETS).map(pk => (
-                <button 
-                  key={pk}
-                  onClick={() => applyPreset(pk as any)}
-                  className="px-2 py-1 font-mono text-[9px] tracking-wider bg-[#1c1c1c] border border-[#262626] text-[#606060] hover:border-[#c8a030] hover:text-[#c8a030] transition-colors uppercase"
-                >
-                  {pk}
-                </button>
-              ))}
-            </div>
-          </section>
-
-          {/* Resolution */}
-          <section className="p-4 border-b border-[#1a1a1a]">
-            <h3 className="font-mono text-[9px] tracking-[2px] uppercase text-[#7a5f18] mb-3 flex items-center gap-2">
-              <Maximize2 size={10} /> Resolution
-            </h3>
-            <div className="grid grid-cols-2 gap-2 mb-3">
-              <div>
-                <span className="text-[9px] uppercase text-[#606060] block mb-1">Width</span>
-                <input 
-                  type="number" 
-                  value={params.width}
-                  onChange={(e) => updateParam('width', parseInt(e.target.value) || 1)}
-                  className="w-full bg-[#141414] text-[#f0f0f0] border border-[#262626] p-2 font-mono text-xs outline-none focus:border-[#c8a030]"
-                />
-              </div>
-              <div>
-                <span className="text-[9px] uppercase text-[#606060] block mb-1">Height</span>
-                <input 
-                  type="number" 
-                  value={params.height}
-                  onChange={(e) => updateParam('height', parseInt(e.target.value) || 1)}
-                  className="w-full bg-[#141414] text-[#f0f0f0] border border-[#262626] p-2 font-mono text-xs outline-none focus:border-[#c8a030]"
-                />
-              </div>
-            </div>
-            <select 
-              onChange={(e) => {
-                const res = parseInt(e.target.value);
-                updateParam('width', res);
-                updateParam('height', res);
-              }}
-              className="w-full bg-[#141414] text-[#f0f0f0] border border-[#262626] p-2 font-mono text-xs outline-none focus:border-[#c8a030] cursor-pointer appearance-none bg-[url('data:image/svg+xml,%3Csvg_xmlns=%22http://www.w3.org/2000/svg%22_width=%2210%22_height=%226%22%3E%3Cpath_d=%22M0_0l5_6_5-6z%22_fill=%22%23606060%22/%3E%3C/svg%3E')] bg-no-repeat bg-[right_10px_center]"
-            >
-              <option value="">Quick Presets...</option>
-              {RESOLUTIONS.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
-            </select>
-          </section>
-
-          {/* Image Import */}
-          <section className="p-4 border-b border-[#1a1a1a]">
-            <h3 className="font-mono text-[9px] tracking-[2px] uppercase text-[#7a5f18] mb-3 flex items-center gap-2">
-              <ImageIcon size={10} /> Image Heightmap
-            </h3>
-            <div className="flex flex-col gap-3">
-              <label className="w-full cursor-pointer group">
-                <div className="w-full border border-dashed border-[#262626] group-hover:border-[#c8a030] p-4 flex flex-col items-center justify-center gap-2 transition-colors">
-                  <Upload size={16} className="text-[#606060] group-hover:text-[#c8a030]" />
-                  <span className="text-[10px] uppercase tracking-wider text-[#606060]">Import Image</span>
-                </div>
-                <input 
-                  type="file" 
-                  accept="image/*" 
-                  className="hidden" 
-                  onChange={(e) => e.target.files?.[0] && processImage(e.target.files[0])}
-                />
-              </label>
-
-              {imagePreview && (
-                <div className="relative group">
-                  <img src={imagePreview} alt="Preview" className="w-full h-24 object-cover border border-[#262626]" />
-                  <button 
-                    onClick={() => { setBaseImage(null); setImagePreview(null); }}
-                    className="absolute top-1 right-1 bg-black/80 p-1 text-[#606060] hover:text-white transition-colors"
-                  >
-                    <X size={12} />
-                  </button>
-                </div>
-              )}
-
-              <div className="space-y-3">
-                <div>
-                  <div className="flex justify-between items-center mb-1">
-                    <span className="text-[10px] font-semibold tracking-wider uppercase text-[#606060]">Image Intensity</span>
-                    <span className="font-mono text-[10px] text-[#c8a030]">{params.imageIntensity.toFixed(2)}</span>
-                  </div>
-                  <input 
-                    type="range" min="0" max="2" step="0.01"
-                    value={params.imageIntensity}
-                    onChange={(e) => updateParam('imageIntensity', parseFloat(e.target.value))}
-                    onDoubleClick={() => resetParam('imageIntensity')}
-                    className="w-full h-0.5 bg-[#262626] appearance-none outline-none cursor-pointer accent-[#c8a030]"
-                  />
-                </div>
-                <div>
-                  <div className="flex justify-between items-center mb-1">
-                    <span className="text-[10px] font-semibold tracking-wider uppercase text-[#606060]">Noise Intensity</span>
-                    <span className="font-mono text-[10px] text-[#c8a030]">{params.noiseIntensity.toFixed(2)}</span>
-                  </div>
-                  <input 
-                    type="range" min="0" max="2" step="0.01"
-                    value={params.noiseIntensity}
-                    onChange={(e) => updateParam('noiseIntensity', parseFloat(e.target.value))}
-                    onDoubleClick={() => resetParam('noiseIntensity')}
-                    className="w-full h-0.5 bg-[#262626] appearance-none outline-none cursor-pointer accent-[#c8a030]"
-                  />
-                </div>
-              </div>
-            </div>
-          </section>
-
-          {/* Parameters */}
-          <section className="p-4 border-b border-[#1a1a1a]">
-            <h3 className="font-mono text-[9px] tracking-[2px] uppercase text-[#7a5f18] mb-4 flex items-center gap-2">
-              <Settings size={10} /> Noise Parameters
-            </h3>
-            
-            {[
-              { label: 'Scale', key: 'scale', min: 0, max: 6, step: 0.1, dec: 1 },
-              { label: 'Octaves', key: 'octaves', min: 4, max: 12, step: 1, dec: 0 },
-              { label: 'Persistence', key: 'persistence', min: 0.15, max: 0.95, step: 0.01, dec: 2 },
-              { label: 'Lacunarity', key: 'lacunarity', min: 0, max: 4.0, step: 0.05, dec: 2 },
-            ].map(ctrl => (
-              <div key={ctrl.key} className="mb-4 last:mb-0">
-                <div className="flex justify-between items-center mb-1">
-                  <span className="text-[11px] font-semibold tracking-wider uppercase text-[#b8b8b8]">{ctrl.label}</span>
-                  <span className="font-mono text-[10px] text-[#c8a030]">{(params as any)[ctrl.key].toFixed(ctrl.dec)}</span>
-                </div>
-                <input 
-                  type="range" 
-                  min={ctrl.min} 
-                  max={ctrl.max} 
-                  step={ctrl.step}
-                  value={(params as any)[ctrl.key]}
-                  onChange={(e) => updateParam(ctrl.key as any, parseFloat(e.target.value))}
-                  onDoubleClick={() => resetParam(ctrl.key as any)}
-                  className="w-full h-0.5 bg-[#262626] appearance-none outline-none cursor-pointer accent-[#c8a030]"
-                />
-              </div>
-            ))}
-
-            <div className="mt-4">
-              <span className="text-[11px] font-semibold tracking-wider uppercase text-[#b8b8b8] block mb-1">Seed</span>
-              <input 
-                type="number" 
-                value={params.seed}
-                onChange={(e) => updateParam('seed', parseInt(e.target.value) || 0)}
-                className="w-full bg-[#141414] text-[#f0f0f0] border border-[#262626] p-1.5 font-mono text-xs outline-none focus:border-[#c8a030]"
-              />
-            </div>
-          </section>
-
-          {/* Island / Clustering */}
-          <section className="p-4 border-b border-[#1a1a1a]">
-            <h3 className="font-mono text-[9px] tracking-[2px] uppercase text-[#7a5f18] mb-4">Island / Clustering</h3>
-            {[
-              { label: 'Threshold', key: 'threshold', min: 0.0, max: 1.0, step: 0.01, dec: 2 },
-              { label: 'Island Contrast', key: 'contrast', min: 0, max: 6, step: 0.1, dec: 1 },
-              { label: 'Bias (B↔W)', key: 'bias', min: -0.45, max: 0.45, step: 0.01, dec: 2 },
-              { label: 'Island Spread', key: 'spread', min: 0, max: 48, step: 1, dec: 0 },
-            ].map(ctrl => (
-              <div key={ctrl.key} className="mb-4 last:mb-0">
-                <div className="flex justify-between items-center mb-1">
-                  <span className="text-[11px] font-semibold tracking-wider uppercase text-[#b8b8b8]">{ctrl.label}</span>
-                  <span className="font-mono text-[10px] text-[#c8a030]">{(params as any)[ctrl.key].toFixed(ctrl.dec)}</span>
-                </div>
-                <input 
-                  type="range" 
-                  min={ctrl.min} 
-                  max={ctrl.max} 
-                  step={ctrl.step}
-                  value={(params as any)[ctrl.key]}
-                  onChange={(e) => updateParam(ctrl.key as any, parseFloat(e.target.value))}
-                  onDoubleClick={() => resetParam(ctrl.key as any)}
-                  className="w-full h-0.5 bg-[#262626] appearance-none outline-none cursor-pointer accent-[#c8a030]"
-                />
-              </div>
-            ))}
-          </section>
-
-          {/* Options */}
-          <section className="p-4 border-b border-[#1a1a1a]">
-            <h3 className="font-mono text-[9px] tracking-[2px] uppercase text-[#7a5f18] mb-3">Options</h3>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[11px] font-semibold tracking-wider uppercase">Seamless Tiling</span>
-              <button 
-                onClick={() => updateParam('seamless', !params.seamless)}
-                className={`relative w-8 h-4 transition-colors duration-200 ${ params.seamless ? 'bg-[#7a5f18]' : 'bg-[#262626]' }`}
-              >
-                <div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-[#606060] transition-transform duration-200 ${ params.seamless ? 'translate-x-4 bg-[#c8a030]' : '' }`} />
-              </button>
-            </div>
-            <div className="flex items-center justify-between mb-2 last:mb-0">
-              <span className="text-[11px] font-semibold tracking-wider uppercase">Invert Colors</span>
-              <button 
-                onClick={handleInvertToggle}
-                className={`relative w-8 h-4 transition-colors duration-200 ${ params.invert ? 'bg-[#7a5f18]' : 'bg-[#262626]' }`}
-              >
-                <div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-[#606060] transition-transform duration-200 ${ params.invert ? 'translate-x-4 bg-[#c8a030]' : '' }`} />
-              </button>
-            </div>
-          </section>
-
-          {/* Batch Generation */}
-          <section className="p-4 border-b border-[#1a1a1a]">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="font-mono text-[9px] tracking-[2px] uppercase text-[#7a5f18] flex items-center gap-2">
-                <LayoutGrid size={10} /> Batch Mode
-              </h3>
-              <button 
-                onClick={() => updateBatchSetting('enabled', !batchSettings.enabled)}
-                className={`relative w-8 h-4 transition-colors duration-200 ${ batchSettings.enabled ? 'bg-[#7a5f18]' : 'bg-[#262626]' }`}
-              >
-                <div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-[#606060] transition-transform duration-200 ${ batchSettings.enabled ? 'translate-x-4 bg-[#c8a030]' : '' }`} />
-              </button>
-            </div>
-
-            {batchSettings.enabled && (
-              <motion.div 
-                initial={{ height: 0, opacity: 0 }}
-                animate={{ height: 'auto', opacity: 1 }}
-                className="overflow-hidden space-y-3"
-              >
-                <div>
-                  <span className="text-[10px] uppercase text-[#606060] block mb-1">Batch Size</span>
-                  <div className="flex gap-1">
-                    {[4, 8, 12, 16].map(n => (
-                      <button 
-                        key={n}
-                        onClick={() => updateBatchSetting('count', n)}
-                        className={`flex-1 py-1 font-mono text-[10px] border ${batchSettings.count === n ? 'border-[#c8a030] text-[#c8a030]' : 'border-[#262626] text-[#606060]'}`}
-                      >
-                        {n}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <span className="text-[10px] uppercase text-[#606060] block">Randomize Fields</span>
-                  {[
-                    { label: 'Seed', key: 'randomizeSeed' },
-                    { label: 'Threshold', key: 'randomizeThreshold' },
-                    { label: 'Contrast', key: 'randomizeContrast' },
-                    { label: 'Bias', key: 'randomizeBias' },
-                    { label: 'Spread', key: 'randomizeSpread' },
-                  ].map(field => (
-                    <label key={field.key} className="flex items-center gap-2 cursor-pointer group">
-                      <input 
-                        type="checkbox" 
-                        checked={(batchSettings as any)[field.key]}
-                        onChange={(e) => updateBatchSetting(field.key as any, e.target.checked)}
-                        className="hidden"
-                      />
-                      <div className={`w-3 h-3 border flex items-center justify-center transition-colors ${ (batchSettings as any)[field.key] ? 'border-[#c8a030] bg-[#c8a030]/10' : 'border-[#262626]' }`}>
-                        { (batchSettings as any)[field.key] && <Check size={8} className="text-[#c8a030]" /> }
-                      </div>
-                      <span className={`text-[10px] uppercase tracking-wider transition-colors ${ (batchSettings as any)[field.key] ? 'text-[#c8a030]' : 'text-[#606060] group-hover:text-[#b8b8b8]' }`}>
-                        {field.label}
-                      </span>
-                    </label>
-                  ))}
-                </div>
-              </motion.div>
-            )}
-          </section>
-
-          {/* Action Buttons */}
-          <section className="p-4 mt-auto flex flex-col gap-2">
-            <button 
-              onClick={() => generate()}
-              className={`w-full py-2.5 font-bold text-xs tracking-[2px] uppercase transition-all flex items-center justify-center gap-2 ${
-                isGenerating ? 'bg-[#4a2020] text-[#f0a0a0]' : 'bg-[#c8a030] text-black hover:bg-[#f0f0f0]'
-              }`}
-            >
-              {isGenerating ? <><X size={14} /> Cancel</> : <><Play size={14} /> {batchSettings.enabled ? 'Generate Batch' : 'Full Render'}</>}
-            </button>
-            {batchSettings.enabled && batchResults.length > 0 ? (
-              <button 
-                onClick={downloadAllBatch}
-                disabled={isGenerating}
-                className="w-full py-2.5 font-bold text-xs tracking-[2px] uppercase border border-[#262626] text-[#b8b8b8] hover:border-[#c8a030] hover:text-[#c8a030] transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-              >
-                <Download size={14} /> Download All ({batchResults.length})
-              </button>
-            ) : (
-              <button 
-                onClick={() => downloadPNG()}
-                disabled={!currentResult || isGenerating}
-                className="w-full py-2.5 font-bold text-xs tracking-[2px] uppercase border border-[#262626] text-[#b8b8b8] hover:border-[#c8a030] hover:text-[#c8a030] transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-              >
-                <Download size={14} /> Download PNG
-              </button>
-            )}
-            <div className="font-mono text-[10px] text-[#606060] text-center mt-1">
-              {statText}
-            </div>
-          </section>
-        </aside>
-
         {/* Preview Area */}
         <section 
           ref={previewSectionRef}
-          className="flex-1 flex flex-col items-center justify-center relative overflow-hidden p-8 cursor-default"
+          className="flex-1 flex flex-col items-center justify-center relative overflow-hidden p-8 cursor-default bg-[#050505]"
           onWheel={handleWheel}
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
@@ -851,71 +697,54 @@ export default function App() {
           {/* Grid Background */}
           <div className="absolute inset-0 pointer-events-none opacity-40 bg-[linear-gradient(#1a1a1a_1px,transparent_1px),linear-gradient(90deg,#1a1a1a_1px,transparent_1px)] bg-[size:40px_40px]" />
           
-          {/* Zoom Controls */}
-          <div className="absolute top-4 right-4 flex flex-col gap-2 z-40">
-            <button 
-              onClick={() => setZoom(prev => Math.min(5, prev + 0.2))}
-              className="w-8 h-8 bg-[#0e0e0e] border border-[#262626] text-[#b8b8b8] hover:border-[#c8a030] hover:text-[#c8a030] flex items-center justify-center font-bold transition-colors"
-              title="Zoom In (+)"
-            >
-              +
-            </button>
-            <button 
-              onClick={() => setZoom(prev => Math.max(0.1, prev - 0.2))}
-              className="w-8 h-8 bg-[#0e0e0e] border border-[#262626] text-[#b8b8b8] hover:border-[#c8a030] hover:text-[#c8a030] flex items-center justify-center font-bold transition-colors"
-              title="Zoom Out (-)"
-            >
-              -
-            </button>
-            <button 
-              onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}
-              className="w-8 h-8 bg-[#0e0e0e] border border-[#262626] text-[#606060] hover:text-[#c8a030] flex items-center justify-center transition-colors"
-              title="Reset Zoom"
-            >
-              <RefreshCw size={12} />
-            </button>
-          </div>
-
           <div 
             className="w-full h-full flex items-center justify-center transition-transform duration-200 ease-out origin-[0_0]"
             style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
           >
             {batchSettings.enabled && batchResults.length > 0 ? (
-              <div className="flex items-center justify-center p-4">
-                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                  {batchResults.map((res, idx) => (
-                    <div key={idx} className="relative group bg-[#0e0e0e] border border-[#262626] p-2 flex flex-col gap-2 min-w-[180px]">
-                      <div className="relative aspect-square overflow-hidden bg-black">
-                        <img 
-                          src={res.dataUrl}
-                          alt={`Variation ${idx}`}
-                          className="w-full h-full object-contain [image-rendering:pixelated]"
-                        />
-                        <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-2">
-                          <button 
-                            onClick={() => downloadPNG(res)}
-                            className="px-3 py-1.5 bg-[#c8a030] text-black font-bold text-[10px] uppercase tracking-wider flex items-center gap-2 hover:bg-white transition-colors"
-                          >
-                            <Download size={12} /> Save
-                          </button>
-                          <button 
-                            onClick={() => {
-                              setParams({ ...params, ...res.params });
-                              setBatchSettings({ ...batchSettings, enabled: false });
-                            }}
-                            className="px-3 py-1.5 bg-[#1c1c1c] text-[#c8a030] border border-[#c8a030] font-bold text-[10px] uppercase tracking-wider flex items-center gap-2 hover:bg-[#c8a030] hover:text-black transition-colors"
-                          >
-                            <Copy size={12} /> Apply
-                          </button>
-                        </div>
-                      </div>
-                      <div className="flex justify-between items-center font-mono text-[9px] text-[#606060]">
-                        <span>S: {res.params.seed}</span>
-                        <span>T: {res.params.threshold.toFixed(2)}</span>
+              <div className="flex flex-wrap items-center justify-center gap-6 p-12 max-w-full">
+                {batchResults.map((res, idx) => (
+                  <div key={idx} className="relative group bg-[#0e0e0e] border border-[#262626] p-3 flex flex-col gap-3 shadow-2xl transition-transform hover:scale-105 z-10">
+                    <div className="relative w-[240px] aspect-square overflow-hidden bg-black border border-[#1a1a1a]">
+                      <img 
+                        src={res.dataUrl}
+                        alt={`Variation ${idx}`}
+                        className="w-full h-full object-contain [image-rendering:pixelated]"
+                      />
+                      <div className="absolute inset-0 bg-black/70 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-3 pointer-events-none group-hover:pointer-events-auto">
+                        <button 
+                          onClick={() => downloadPNG(res)}
+                          className="px-4 py-2 bg-[#c8a030] text-black font-bold text-[10px] uppercase tracking-[2px] flex items-center gap-2 hover:bg-white transition-all"
+                        >
+                          <Download size={14} /> Save PNG
+                        </button>
+                        <button 
+                          onClick={() => {
+                            setParams({ ...params, ...res.params });
+                            setBatchSettings({ ...batchSettings, enabled: false });
+                          }}
+                          className="px-4 py-2 bg-[#1c1c1c] text-[#c8a030] border border-[#c8a030] font-bold text-[10px] uppercase tracking-[2px] flex items-center gap-2 hover:bg-[#c8a030] hover:text-black transition-all"
+                        >
+                          <Copy size={14} /> Apply Settings
+                        </button>
                       </div>
                     </div>
-                  ))}
-                </div>
+                    <div className="flex flex-col gap-1 font-mono text-[10px] text-[#606060] border-t border-[#1a1a1a] pt-2">
+                      <div className="flex justify-between">
+                        <span className="text-[#c8a030]">SEED:</span>
+                        <span>{res.params.seed}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-[#c8a030]">THR:</span>
+                        <span>{res.params.threshold.toFixed(2)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-[#c8a030]">CTR:</span>
+                        <span>{res.params.contrast.toFixed(1)}</span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
             ) : (
               <div className="relative max-w-full max-h-full group">
@@ -963,7 +792,394 @@ export default function App() {
 
           {/* Progress Bar */}
           <div className="absolute bottom-0 left-0 h-0.5 bg-[#c8a030] transition-[width] duration-75 ease-linear z-30" style={{ width: `${progress * 100}%` }} />
+
+          {/* Zoom Controls Overlay */}
+          <div className="absolute bottom-6 left-6 flex items-center gap-2 bg-[#0e0e0e]/80 backdrop-blur-md border border-[#262626] p-1.5 rounded-lg shadow-2xl z-20">
+            <button 
+              onClick={() => setZoom(prev => Math.max(0.1, prev - 0.2))}
+              className="p-2 text-[#606060] hover:text-[#c8a030] transition-colors"
+              title="Zoom Out (Ctrl -)"
+            >
+              <Minus size={16} />
+            </button>
+            <div className="w-px h-4 bg-[#262626]" />
+            <button 
+              onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}
+              className="px-3 py-1 text-[10px] font-mono text-[#b8b8b8] hover:text-[#c8a030] transition-colors"
+              title="Reset View (Ctrl 0)"
+            >
+              1:1
+            </button>
+            <div className="w-px h-4 bg-[#262626]" />
+            <button 
+              onClick={() => setZoom(prev => Math.min(10, prev + 0.2))}
+              className="p-2 text-[#606060] hover:text-[#c8a030] transition-colors"
+              title="Zoom In (Ctrl +)"
+            >
+              <Plus size={16} />
+            </button>
+          </div>
         </section>
+
+        {/* Sidebar (Right) */}
+        <aside className="w-80 bg-[#0e0e0e] border-l border-[#262626] overflow-y-auto shrink-0 flex flex-col scrollbar-thin scrollbar-thumb-[#262626] scrollbar-track-transparent">
+          
+          <CollapsibleSection id="presets" title="Presets" icon={Settings}>
+            <div className="grid grid-cols-2 gap-2">
+              {Object.entries(PRESETS).map(([name, preset]) => (
+                <button 
+                  key={name}
+                  onClick={() => applyPreset(name as any)}
+                  className="px-3 py-2 bg-[#141414] border border-[#262626] text-[10px] font-mono text-[#b8b8b8] uppercase tracking-wider hover:border-[#c8a030] hover:text-[#c8a030] transition-all text-left flex items-center justify-between group"
+                >
+                  {name}
+                  <Play size={8} className="opacity-0 group-hover:opacity-100 transition-opacity" />
+                </button>
+              ))}
+            </div>
+          </CollapsibleSection>
+
+          <CollapsibleSection id="layers" title="Layers" icon={Layers}>
+            <div className="flex justify-between items-center mb-3">
+              <button 
+                onClick={addLayer}
+                className="flex items-center gap-2 px-3 py-1.5 bg-[#c8a030]/10 border border-[#c8a030]/30 text-[#c8a030] font-mono text-[9px] uppercase hover:bg-[#c8a030]/20 transition-colors w-full justify-center"
+              >
+                <Plus size={10} /> Add New Layer
+              </button>
+            </div>
+            <div className="space-y-1 max-h-60 overflow-y-auto pr-1 custom-scrollbar">
+              {params.layers.map((layer, idx) => (
+                <div 
+                  key={layer.id}
+                  onClick={() => setActiveLayerId(layer.id)}
+                  className={`flex items-center justify-between p-2 border ${activeLayerId === layer.id ? 'border-[#c8a030] bg-[#1c1c1c]' : 'border-[#262626] bg-[#141414]'} cursor-pointer hover:border-[#444] transition-colors`}
+                >
+                  <div className="flex items-center gap-2 overflow-hidden">
+                    <span className="font-mono text-[9px] text-[#606060]">{idx + 1}</span>
+                    <span className="font-mono text-[10px] text-[#b8b8b8] truncate">{NOISE_TYPES.find(t => t.id === layer.noiseType)?.name}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); updateLayer(layer.id, 'visible', !layer.visible); }}
+                      className={`p-1 ${layer.visible ? 'text-[#c8a030]' : 'text-[#444]'}`}
+                    >
+                      <Check size={10} />
+                    </button>
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); removeLayer(layer.id); }}
+                      className="p-1 text-[#606060] hover:text-red-500"
+                    >
+                      <Trash2 size={10} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </CollapsibleSection>
+
+          <CollapsibleSection id="activeLayer" title={`Layer ${params.layers.findIndex(l => l.id === activeLayerId) + 1} Settings`} icon={Settings}>
+            <div className="space-y-4">
+              <div className="flex justify-between items-center">
+                <span className="text-[9px] uppercase text-[#606060]">Noise Type</span>
+                <button 
+                  onClick={() => randomizeSeed(activeLayerId)}
+                  className="p-1 text-[#606060] hover:text-[#c8a030]"
+                  title="Randomize Seed"
+                >
+                  <RefreshCw size={10} />
+                </button>
+              </div>
+              <select 
+                value={activeLayer.noiseType}
+                onChange={(e) => updateLayer(activeLayerId, 'noiseType', e.target.value)}
+                className="w-full bg-[#141414] text-[#f0f0f0] border border-[#262626] p-2 font-mono text-xs outline-none focus:border-[#c8a030] cursor-pointer appearance-none bg-[url('data:image/svg+xml,%3Csvg_xmlns=%22http://www.w3.org/2000/svg%22_width=%2210%22_height=%226%22%3E%3Cpath_d=%22M0_0l5_6_5-6z%22_fill=%22%23606060%22/%3E%3C/svg%3E')] bg-no-repeat bg-[right_10px_center]"
+              >
+                {NOISE_TYPES.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+
+              {activeLayer.noiseType !== 'perlin' && (
+                <div className="grid grid-cols-2 gap-4">
+                  <Slider 
+                    label="Octaves" value={activeLayer.octaves} min={1} max={12} step={1} dec={0}
+                    onChange={(v) => updateLayer(activeLayerId, 'octaves', v)}
+                    onReset={() => resetLayerParam(activeLayerId, 'octaves')}
+                    defaultValue={DEFAULT_LAYER.octaves}
+                    tooltip="Number of noise layers combined for detail."
+                  />
+                  <Slider 
+                    label="Persistence" value={activeLayer.persistence} min={0.1} max={0.9} step={0.01}
+                    onChange={(v) => updateLayer(activeLayerId, 'persistence', v)}
+                    onReset={() => resetLayerParam(activeLayerId, 'persistence')}
+                    defaultValue={DEFAULT_LAYER.persistence}
+                    tooltip="How much each octave contributes to the final shape."
+                  />
+                </div>
+              )}
+
+              <Slider 
+                label="Scale" value={activeLayer.scale} min={0.1} max={20} step={0.1} dec={1}
+                onChange={(v) => updateLayer(activeLayerId, 'scale', v)}
+                onReset={() => resetLayerParam(activeLayerId, 'scale')}
+                defaultValue={DEFAULT_LAYER.scale}
+                tooltip="Size of the noise features. Lower = larger blobs."
+              />
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <span className="text-[9px] uppercase text-[#606060] block mb-1">Blend Mode</span>
+                  <select 
+                    value={activeLayer.blendMode}
+                    onChange={(e) => updateLayer(activeLayerId, 'blendMode', e.target.value)}
+                    className="w-full bg-[#141414] text-[#f0f0f0] border border-[#262626] p-1.5 font-mono text-[10px] outline-none focus:border-[#c8a030]"
+                  >
+                    <option value="normal">Normal</option>
+                    <option value="add">Add</option>
+                    <option value="subtract">Subtract</option>
+                    <option value="multiply">Multiply</option>
+                    <option value="screen">Screen</option>
+                    <option value="overlay">Overlay</option>
+                  </select>
+                </div>
+                <Slider 
+                  label="Opacity" value={activeLayer.intensity} min={0} max={1} step={0.01}
+                  onChange={(v) => updateLayer(activeLayerId, 'intensity', v)}
+                  onReset={() => resetLayerParam(activeLayerId, 'intensity')}
+                  defaultValue={1.0}
+                />
+              </div>
+
+              <div>
+                <span className="text-[9px] uppercase text-[#606060] block mb-1">Seed</span>
+                <div className="flex gap-2">
+                  <input 
+                    type="number" 
+                    value={activeLayer.seed}
+                    onChange={(e) => updateLayer(activeLayerId, 'seed', parseInt(e.target.value) || 0)}
+                    className="flex-1 bg-[#141414] text-[#f0f0f0] border border-[#262626] p-1.5 font-mono text-xs outline-none focus:border-[#c8a030]"
+                  />
+                  <button 
+                    onClick={() => updateLayer(activeLayerId, 'invert', !activeLayer.invert)}
+                    className={`px-2 py-1 font-mono text-[9px] border ${activeLayer.invert ? 'border-[#c8a030] text-[#c8a030]' : 'border-[#262626] text-[#606060]'} uppercase`}
+                  >
+                    Invert
+                  </button>
+                </div>
+              </div>
+            </div>
+          </CollapsibleSection>
+
+          <CollapsibleSection id="resolution" title="Resolution" icon={Maximize2}>
+            <div className="grid grid-cols-2 gap-2">
+              {RESOLUTIONS.map(res => (
+                <button 
+                  key={res.id}
+                  onClick={() => {
+                    const size = parseInt(res.id);
+                    updateParam('width', size);
+                    updateParam('height', size);
+                  }}
+                  className={`px-2 py-1.5 border font-mono text-[10px] uppercase transition-all ${params.width === parseInt(res.id) ? 'border-[#c8a030] text-[#c8a030] bg-[#c8a030]/5' : 'border-[#262626] text-[#606060] hover:border-[#444]'}`}
+                >
+                  {res.name}
+                </button>
+              ))}
+            </div>
+          </CollapsibleSection>
+
+          <CollapsibleSection id="heightmap" title="Image Heightmap" icon={ImageIcon}>
+            <div className="space-y-4">
+              <div 
+                className="border-2 border-dashed border-[#262626] hover:border-[#c8a030] transition-colors p-4 flex flex-col items-center justify-center gap-2 cursor-pointer relative group"
+                onClick={() => document.getElementById('file-upload')?.click()}
+              >
+                <input 
+                  id="file-upload"
+                  type="file" 
+                  className="hidden" 
+                  accept="image/*"
+                  onChange={(e) => e.target.files?.[0] && processImage(e.target.files[0])}
+                />
+                {imagePreview ? (
+                  <div className="relative group/img">
+                    <img src={imagePreview} className="w-full h-32 object-contain opacity-50 group-hover:opacity-80 transition-opacity" />
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); setBaseImage(null); setImagePreview(null); }}
+                      className="absolute top-1 right-1 bg-black/80 p-1 text-[#606060] hover:text-white transition-colors opacity-0 group-hover/img:opacity-100"
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <Upload size={20} className="text-[#333]" />
+                    <span className="text-[10px] uppercase text-[#444] text-center">Drop image to use as base heightmap</span>
+                  </>
+                )}
+              </div>
+              {baseImage && (
+                <Slider 
+                  label="Image Influence" value={params.imageIntensity} min={0} max={2} step={0.01}
+                  onChange={(v) => updateParam('imageIntensity', v)}
+                  onReset={() => updateParam('imageIntensity', 1.0)}
+                  defaultValue={1.0}
+                  tooltip="How strongly the uploaded image affects the noise."
+                />
+              )}
+            </div>
+          </CollapsibleSection>
+
+          <CollapsibleSection id="postProcess" title="Global Post-Process" icon={Settings}>
+            <div className="flex justify-between items-center mb-4">
+              <button 
+                onClick={randomizeAll}
+                className="flex items-center gap-1 px-2 py-1 bg-[#c8a030]/10 border border-[#c8a030]/30 text-[#c8a030] font-mono text-[9px] uppercase hover:bg-[#c8a030]/20 transition-colors w-full justify-center"
+              >
+                <RefreshCw size={10} /> Randomize All
+              </button>
+            </div>
+            
+            <div className="space-y-4">
+              <Slider 
+                label="Threshold" value={params.threshold} min={0} max={1} step={0.01}
+                onChange={(v) => updateParam('threshold', v)}
+                onReset={() => resetParam('threshold')}
+                defaultValue={defaultParams.threshold}
+                tooltip="Controls the black/white split ratio."
+              />
+              <Slider 
+                label="Island Contrast" value={params.contrast} min={0} max={extremeSettings ? 200 : 100} step={0.1} dec={1}
+                onChange={(v) => updateParam('contrast', v)}
+                onReset={() => updateParam('contrast', 20)}
+                defaultValue={20}
+                tooltip="Controls the sharpness of the island edges. Lower values create softer, more gradient-like transitions."
+              />
+              <Slider 
+                label="Bias" value={params.bias} min={-0.5} max={0.5} step={0.01}
+                onChange={(v) => updateParam('bias', v)}
+                onReset={() => resetParam('bias')}
+                defaultValue={defaultParams.bias}
+                tooltip="Shifts values towards black or white before thresholding."
+              />
+              <Slider 
+                label="Island Spread" value={params.spread} min={0} max={extremeSettings ? 256 : 48} step={1} dec={0}
+                onChange={(v) => updateParam('spread', v)}
+                onReset={() => resetParam('spread')}
+                defaultValue={defaultParams.spread}
+                tooltip="Dilates the white areas."
+              />
+
+              <div className="pt-2 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] uppercase text-[#606060]">Seamless Tiling</span>
+                  <button 
+                    onClick={() => updateParam('seamless', !params.seamless)}
+                    className={`w-8 h-4 rounded-full relative transition-colors ${params.seamless ? 'bg-[#c8a030]' : 'bg-[#262626]'}`}
+                  >
+                    <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${params.seamless ? 'left-4.5' : 'left-0.5'}`} />
+                  </button>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] uppercase text-[#606060]">Invert Colors</span>
+                  <button 
+                    onClick={handleInvertToggle}
+                    className={`w-8 h-4 rounded-full relative transition-colors ${params.invert ? 'bg-[#c8a030]' : 'bg-[#262626]'}`}
+                  >
+                    <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${params.invert ? 'left-4.5' : 'left-0.5'}`} />
+                  </button>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] uppercase text-[#f0a0a0]">Extreme Settings</span>
+                  <button 
+                    onClick={() => setExtremeSettings(!extremeSettings)}
+                    className={`w-8 h-4 rounded-full relative transition-colors ${extremeSettings ? 'bg-[#4a2020]' : 'bg-[#262626]'}`}
+                  >
+                    <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${extremeSettings ? 'left-4.5' : 'left-0.5'}`} />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </CollapsibleSection>
+
+          <CollapsibleSection id="batch" title="Batch Generation" icon={LayoutGrid}>
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] uppercase text-[#606060]">Enable Batch</span>
+                <button 
+                  onClick={() => updateBatchSetting('enabled', !batchSettings.enabled)}
+                  className={`w-8 h-4 rounded-full relative transition-colors ${batchSettings.enabled ? 'bg-[#c8a030]' : 'bg-[#262626]'}`}
+                >
+                  <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${batchSettings.enabled ? 'left-4.5' : 'left-0.5'}`} />
+                </button>
+              </div>
+
+              {batchSettings.enabled && (
+                <div className="space-y-4 pt-2 border-t border-[#1a1a1a]">
+                  <Slider 
+                    label="Count" value={batchSettings.count} min={2} max={12} step={1} dec={0}
+                    onChange={(v) => updateBatchSetting('count', v)}
+                    defaultValue={4}
+                  />
+
+                  <div className="space-y-2">
+                    <span className="text-[10px] uppercase text-[#606060] block mb-1">Randomize Fields</span>
+                    {[
+                      { label: 'Seed', key: 'randomizeSeed' },
+                      { label: 'Threshold', key: 'randomizeThreshold' },
+                      { label: 'Contrast', key: 'randomizeContrast' },
+                      { label: 'Bias', key: 'randomizeBias' },
+                      { label: 'Spread', key: 'randomizeSpread' },
+                    ].map(field => (
+                      <label key={field.key} className="flex items-center gap-2 cursor-pointer group">
+                        <input 
+                          type="checkbox" 
+                          checked={(batchSettings as any)[field.key]}
+                          onChange={(e) => updateBatchSetting(field.key as any, e.target.checked)}
+                          className="hidden"
+                        />
+                        <div className={`w-3.5 h-3.5 border flex items-center justify-center transition-colors ${ (batchSettings as any)[field.key] ? 'border-[#c8a030] bg-[#c8a030]/10' : 'border-[#262626]' }`}>
+                          { (batchSettings as any)[field.key] && <Check size={10} className="text-[#c8a030]" /> }
+                        </div>
+                        <span className={`text-[10px] uppercase tracking-wider transition-colors ${ (batchSettings as any)[field.key] ? 'text-[#c8a030]' : 'text-[#606060] group-hover:text-[#b8b8b8]' }`}>
+                          {field.label}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </CollapsibleSection>
+
+          {/* Action Buttons */}
+          <section className="p-4 mt-auto flex flex-col gap-2 sticky bottom-0 bg-[#0e0e0e] border-t border-[#262626] z-10">
+            <button 
+              onClick={() => generate()}
+              className={`w-full py-2.5 font-bold text-xs tracking-[2px] uppercase transition-all flex items-center justify-center gap-2 ${
+                isGenerating ? 'bg-[#4a2020] text-[#f0a0a0]' : 'bg-[#c8a030] text-black hover:bg-[#f0f0f0]'
+              }`}
+            >
+              {isGenerating ? <><X size={14} /> Cancel</> : <><Play size={14} /> {batchSettings.enabled ? 'Generate Batch' : 'Full Render'}</>}
+            </button>
+            {batchSettings.enabled && batchResults.length > 0 ? (
+              <button 
+                onClick={downloadAllBatch}
+                disabled={isGenerating}
+                className="w-full py-2.5 font-bold text-xs tracking-[2px] uppercase border border-[#262626] text-[#b8b8b8] hover:border-[#c8a030] hover:text-[#c8a030] transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              >
+                <Download size={14} /> Download All ({batchResults.length})
+              </button>
+            ) : (
+              <button 
+                onClick={() => downloadPNG()}
+                disabled={!currentResult || isGenerating}
+                className="w-full py-2.5 font-bold text-xs tracking-[2px] uppercase border border-[#262626] text-[#b8b8b8] hover:border-[#c8a030] hover:text-[#c8a030] transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              >
+                <Download size={14} /> Download PNG
+              </button>
+            )}
+          </section>
+        </aside>
       </main>
     </div>
   );
