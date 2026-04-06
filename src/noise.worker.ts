@@ -301,9 +301,7 @@ self.onmessage = function(e) {
   for (let i=0;i<totalPixels;i++) {
     let v = Math.max(0, Math.min(1, raw[i]+bias));
     v = sigmoid(v, contrast);
-    let pix = v>thr ? 255 : 0;
-    if (invert) pix = 255-pix;
-    binary[i] = pix;
+    binary[i] = v>thr ? 255 : 0;
   }
 
   self.postMessage({type:'progress', progress: 0.8});
@@ -326,7 +324,8 @@ self.onmessage = function(e) {
   // Build RGBA for canvas
   const rgba = new Uint8ClampedArray(W*H*4);
   for (let i=0;i<totalPixels;i++) {
-    const v=final[i];
+    let v=final[i];
+    if (invert) v = 255 - v;
     rgba[i*4]=v; rgba[i*4+1]=v; rgba[i*4+2]=v; rgba[i*4+3]=255;
   }
 

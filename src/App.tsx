@@ -93,6 +93,11 @@ const DEFAULT_PARAMS: NoiseParams = {
 
 export default function App() {
   const [params, setParams] = useState<NoiseParams>(DEFAULT_PARAMS);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
+  const lastMousePos = useRef({ x: 0, y: 0 });
+  const previewSectionRef = useRef<HTMLElement>(null);
 
   const [batchSettings, setBatchSettings] = useState<BatchSettings>({
     enabled: false,
@@ -297,6 +302,65 @@ export default function App() {
     });
   }, [params, isGenerating, baseImage, batchSettings]);
 
+  const handleInvertToggle = () => {
+    const newInvert = !params.invert;
+    setParams(prev => ({ ...prev, invert: newInvert }));
+
+    // Instant update for current result
+    if (currentResult) {
+      const newRgba = new Uint8ClampedArray(currentResult.rgba);
+      for (let i = 0; i < newRgba.length; i += 4) {
+        newRgba[i] = 255 - newRgba[i];
+        newRgba[i+1] = 255 - newRgba[i+1];
+        newRgba[i+2] = 255 - newRgba[i+2];
+      }
+      
+      // Update canvas immediately
+      if (canvasRef.current) {
+        const ctx = canvasRef.current.getContext('2d');
+        if (ctx) {
+          const id = new ImageData(newRgba, currentResult.width, currentResult.height);
+          const pw = Math.min(currentResult.width, 512);
+          const ph = Math.min(currentResult.height, 512);
+          const tempCanvas = document.createElement('canvas');
+          tempCanvas.width = currentResult.width;
+          tempCanvas.height = currentResult.height;
+          const tempCtx = tempCanvas.getContext('2d');
+          if (tempCtx) {
+            tempCtx.putImageData(id, 0, 0);
+            ctx.drawImage(tempCanvas, 0, 0, pw, ph);
+          }
+        }
+      }
+      
+      setCurrentResult({ ...currentResult, rgba: newRgba, params: { ...currentResult.params, invert: newInvert } });
+    }
+
+    // Instant update for batch results
+    if (batchResults.length > 0) {
+      const updatedBatch = batchResults.map(res => {
+        const newRgba = new Uint8ClampedArray(res.rgba);
+        for (let i = 0; i < newRgba.length; i += 4) {
+          newRgba[i] = 255 - newRgba[i];
+          newRgba[i+1] = 255 - newRgba[i+1];
+          newRgba[i+2] = 255 - newRgba[i+2];
+        }
+        
+        const canvas = document.createElement('canvas');
+        canvas.width = res.width;
+        canvas.height = res.height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          const id = new ImageData(newRgba, res.width, res.height);
+          ctx.putImageData(id, 0, 0);
+          return { ...res, rgba: newRgba, dataUrl: canvas.toDataURL(), params: { ...res.params, invert: newInvert } };
+        }
+        return res;
+      });
+      setBatchResults(updatedBatch);
+    }
+  };
+
   // Live updates with debounce
   useEffect(() => {
     if (debounceTimer.current) clearTimeout(debounceTimer.current);
@@ -323,7 +387,6 @@ export default function App() {
     params.bias, 
     params.spread, 
     params.seed, 
-    params.invert, 
     params.seamless,
     params.imageIntensity,
     params.noiseIntensity,
@@ -366,6 +429,82 @@ export default function App() {
       await new Promise(resolve => setTimeout(resolve, 200));
     }
   };
+
+  const copyParamsToClipboard = (p: NoiseParams) => {
+    navigator.clipboard.writeText(JSON.stringify(p, null, 2));
+    setStatText('Parameters copied to clipboard');
+    setTimeout(() => setStatText(currentResult ? `DONE // ${currentResult.width}×${currentResult.height}` : 'Configure and generate'), 2000);
+  };
+
+  const handleWheel = (e: React.WheelEvent) => {
+    if (e.ctrlKey) {
+      e.preventDefault();
+      const zoomSpeed = 0.1;
+      const delta = e.deltaY > 0 ? -zoomSpeed : zoomSpeed;
+      const newZoom = Math.max(0.1, Math.min(5, zoom + delta));
+      
+      // Zoom towards cursor
+      const rect = e.currentTarget.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+      
+      const zoomRatio = newZoom / zoom;
+      setPan(prev => ({
+        x: mouseX - (mouseX - prev.x) * zoomRatio,
+        y: mouseY - (mouseY - prev.y) * zoomRatio
+      }));
+      setZoom(newZoom);
+    }
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      
+      if (e.key === '+' || e.key === '=') {
+        setZoom(prev => Math.min(5, prev + 0.1));
+      }
+      if (e.key === '-' || e.key === '_') {
+        setZoom(prev => Math.max(0.1, prev - 0.1));
+      }
+      if (e.key === '0' && e.ctrlKey) {
+        e.preventDefault();
+        setZoom(1);
+        setPan({ x: 0, y: 0 });
+      }
+    };
+
+    const handleGlobalWheel = (e: WheelEvent) => {
+      if (e.ctrlKey && previewSectionRef.current?.contains(e.target as Node)) {
+        e.preventDefault();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('wheel', handleGlobalWheel, { passive: false });
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('wheel', handleGlobalWheel);
+    };
+  }, []);
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (e.button === 1 || (e.button === 0 && e.altKey)) {
+      setIsPanning(true);
+      lastMousePos.current = { x: e.clientX, y: e.clientY };
+    }
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (isPanning) {
+      const dx = e.clientX - lastMousePos.current.x;
+      const dy = e.clientY - lastMousePos.current.y;
+      setPan(prev => ({ x: prev.x + dx, y: prev.y + dy }));
+      lastMousePos.current = { x: e.clientX, y: e.clientY };
+    }
+  };
+
+  const handleMouseUp = () => setIsPanning(false);
 
   return (
     <div className="flex flex-col h-screen bg-[#080808] text-[#b8b8b8] font-sans overflow-hidden selection:bg-[#c8a030] selection:text-black">
@@ -582,20 +721,24 @@ export default function App() {
           {/* Options */}
           <section className="p-4 border-b border-[#1a1a1a]">
             <h3 className="font-mono text-[9px] tracking-[2px] uppercase text-[#7a5f18] mb-3">Options</h3>
-            {[
-              { label: 'Seamless Tiling', key: 'seamless' },
-              { label: 'Invert Colors', key: 'invert' },
-            ].map(opt => (
-              <div key={opt.key} className="flex items-center justify-between mb-2 last:mb-0">
-                <span className="text-[11px] font-semibold tracking-wider uppercase">{opt.label}</span>
-                <button 
-                  onClick={() => updateParam(opt.key as any, !(params as any)[opt.key])}
-                  className={`relative w-8 h-4 transition-colors duration-200 ${ (params as any)[opt.key] ? 'bg-[#7a5f18]' : 'bg-[#262626]' }`}
-                >
-                  <div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-[#606060] transition-transform duration-200 ${ (params as any)[opt.key] ? 'translate-x-4 bg-[#c8a030]' : '' }`} />
-                </button>
-              </div>
-            ))}
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[11px] font-semibold tracking-wider uppercase">Seamless Tiling</span>
+              <button 
+                onClick={() => updateParam('seamless', !params.seamless)}
+                className={`relative w-8 h-4 transition-colors duration-200 ${ params.seamless ? 'bg-[#7a5f18]' : 'bg-[#262626]' }`}
+              >
+                <div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-[#606060] transition-transform duration-200 ${ params.seamless ? 'translate-x-4 bg-[#c8a030]' : '' }`} />
+              </button>
+            </div>
+            <div className="flex items-center justify-between mb-2 last:mb-0">
+              <span className="text-[11px] font-semibold tracking-wider uppercase">Invert Colors</span>
+              <button 
+                onClick={handleInvertToggle}
+                className={`relative w-8 h-4 transition-colors duration-200 ${ params.invert ? 'bg-[#7a5f18]' : 'bg-[#262626]' }`}
+              >
+                <div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-[#606060] transition-transform duration-200 ${ params.invert ? 'translate-x-4 bg-[#c8a030]' : '' }`} />
+              </button>
+            </div>
           </section>
 
           {/* Batch Generation */}
@@ -696,58 +839,113 @@ export default function App() {
         </aside>
 
         {/* Preview Area */}
-        <section className="flex-1 flex flex-col items-center justify-center relative overflow-hidden p-8">
+        <section 
+          ref={previewSectionRef}
+          className="flex-1 flex flex-col items-center justify-center relative overflow-hidden p-8 cursor-default"
+          onWheel={handleWheel}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onMouseLeave={handleMouseUp}
+        >
           {/* Grid Background */}
           <div className="absolute inset-0 pointer-events-none opacity-40 bg-[linear-gradient(#1a1a1a_1px,transparent_1px),linear-gradient(90deg,#1a1a1a_1px,transparent_1px)] bg-[size:40px_40px]" />
           
-          {batchSettings.enabled && batchResults.length > 0 ? (
-            <div className="w-full h-full overflow-y-auto scrollbar-thin scrollbar-thumb-[#262626] scrollbar-track-transparent pr-2">
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                {batchResults.map((res, idx) => (
-                  <div key={idx} className="relative group bg-[#0e0e0e] border border-[#262626] p-2 flex flex-col gap-2">
-                    <div className="relative aspect-square overflow-hidden bg-black">
-                      <img 
-                        src={res.dataUrl}
-                        alt={`Variation ${idx}`}
-                        className="w-full h-full object-contain [image-rendering:pixelated]"
-                      />
-                      <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-2">
-                        <button 
-                          onClick={() => downloadPNG(res)}
-                          className="px-3 py-1.5 bg-[#c8a030] text-black font-bold text-[10px] uppercase tracking-wider flex items-center gap-2 hover:bg-white transition-colors"
-                        >
-                          <Download size={12} /> Save
-                        </button>
-                        <button 
-                          onClick={() => {
-                            setParams({ ...params, ...res.params });
-                            setBatchSettings({ ...batchSettings, enabled: false });
-                          }}
-                          className="px-3 py-1.5 bg-[#1c1c1c] text-[#c8a030] border border-[#c8a030] font-bold text-[10px] uppercase tracking-wider flex items-center gap-2 hover:bg-[#c8a030] hover:text-black transition-colors"
-                        >
-                          <Copy size={12} /> Apply
-                        </button>
+          {/* Zoom Controls */}
+          <div className="absolute top-4 right-4 flex flex-col gap-2 z-40">
+            <button 
+              onClick={() => setZoom(prev => Math.min(5, prev + 0.2))}
+              className="w-8 h-8 bg-[#0e0e0e] border border-[#262626] text-[#b8b8b8] hover:border-[#c8a030] hover:text-[#c8a030] flex items-center justify-center font-bold transition-colors"
+              title="Zoom In (+)"
+            >
+              +
+            </button>
+            <button 
+              onClick={() => setZoom(prev => Math.max(0.1, prev - 0.2))}
+              className="w-8 h-8 bg-[#0e0e0e] border border-[#262626] text-[#b8b8b8] hover:border-[#c8a030] hover:text-[#c8a030] flex items-center justify-center font-bold transition-colors"
+              title="Zoom Out (-)"
+            >
+              -
+            </button>
+            <button 
+              onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}
+              className="w-8 h-8 bg-[#0e0e0e] border border-[#262626] text-[#606060] hover:text-[#c8a030] flex items-center justify-center transition-colors"
+              title="Reset Zoom"
+            >
+              <RefreshCw size={12} />
+            </button>
+          </div>
+
+          <div 
+            className="w-full h-full flex items-center justify-center transition-transform duration-200 ease-out origin-[0_0]"
+            style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
+          >
+            {batchSettings.enabled && batchResults.length > 0 ? (
+              <div className="flex items-center justify-center p-4">
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                  {batchResults.map((res, idx) => (
+                    <div key={idx} className="relative group bg-[#0e0e0e] border border-[#262626] p-2 flex flex-col gap-2 min-w-[180px]">
+                      <div className="relative aspect-square overflow-hidden bg-black">
+                        <img 
+                          src={res.dataUrl}
+                          alt={`Variation ${idx}`}
+                          className="w-full h-full object-contain [image-rendering:pixelated]"
+                        />
+                        <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-2">
+                          <button 
+                            onClick={() => downloadPNG(res)}
+                            className="px-3 py-1.5 bg-[#c8a030] text-black font-bold text-[10px] uppercase tracking-wider flex items-center gap-2 hover:bg-white transition-colors"
+                          >
+                            <Download size={12} /> Save
+                          </button>
+                          <button 
+                            onClick={() => {
+                              setParams({ ...params, ...res.params });
+                              setBatchSettings({ ...batchSettings, enabled: false });
+                            }}
+                            className="px-3 py-1.5 bg-[#1c1c1c] text-[#c8a030] border border-[#c8a030] font-bold text-[10px] uppercase tracking-wider flex items-center gap-2 hover:bg-[#c8a030] hover:text-black transition-colors"
+                          >
+                            <Copy size={12} /> Apply
+                          </button>
+                        </div>
+                      </div>
+                      <div className="flex justify-between items-center font-mono text-[9px] text-[#606060]">
+                        <span>S: {res.params.seed}</span>
+                        <span>T: {res.params.threshold.toFixed(2)}</span>
                       </div>
                     </div>
-                    <div className="flex justify-between items-center font-mono text-[9px] text-[#606060]">
-                      <span>S: {res.params.seed}</span>
-                      <span>T: {res.params.threshold.toFixed(2)}</span>
-                    </div>
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
-            </div>
-          ) : (
-            <div className="relative max-w-[calc(100%-60px)] max-h-[calc(100%-100px)] group">
-              <canvas 
-                ref={canvasRef}
-                className="block max-w-full max-h-full border border-[#262626] shadow-[0_0_40px_rgba(0,0,0,0.8)] [image-rendering:pixelated]"
-              />
-              <div className="absolute -bottom-6 right-0 font-mono text-[10px] text-[#606060]">
-                {previewInfo}
+            ) : (
+              <div className="relative max-w-full max-h-full group">
+                <canvas 
+                  ref={canvasRef}
+                  className="block max-w-full max-h-full border border-[#262626] shadow-[0_0_40px_rgba(0,0,0,0.8)] [image-rendering:pixelated]"
+                />
+                
+                {/* Single Preview Hover Controls */}
+                <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-3 pointer-events-none group-hover:pointer-events-auto">
+                  <button 
+                    onClick={() => downloadPNG()}
+                    className="px-4 py-2 bg-[#c8a030] text-black font-bold text-xs uppercase tracking-[2px] flex items-center gap-2 hover:bg-white transition-all transform translate-y-2 group-hover:translate-y-0"
+                  >
+                    <Download size={14} /> Download PNG
+                  </button>
+                  <button 
+                    onClick={() => copyParamsToClipboard(params)}
+                    className="px-4 py-2 bg-[#1c1c1c] text-[#c8a030] border border-[#c8a030] font-bold text-xs uppercase tracking-[2px] flex items-center gap-2 hover:bg-[#c8a030] hover:text-black transition-all transform translate-y-2 group-hover:translate-y-0"
+                  >
+                    <Copy size={14} /> Copy Params
+                  </button>
+                </div>
+
+                <div className="absolute -bottom-6 right-0 font-mono text-[10px] text-[#606060]">
+                  {previewInfo}
+                </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
 
           {/* Overlays */}
           <AnimatePresence>
